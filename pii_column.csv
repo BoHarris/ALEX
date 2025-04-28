@@ -1,0 +1,48 @@
+column,value_samples,pii
+name,"['Alice', 'Bob', 'Charlie']",yes
+full_name,"['Alice Smith', 'Bob Johnson']",yes
+email,"['alice@gmail.com', 'bob@yahoo.com']",yes
+email_32,"['test@gmail.com', 'me@xyz.org']",yes
+phone,"['123-456-7890', '(555) 123-4567']",yes
+phone_79,"['123-456-7890', '(555) 123-4567']",yes
+address,"['123 Main St', '456 Elm Ave']",yes
+address_43,"['123 Main St', '456 Elm Ave']",yes
+ssn,"['123-45-6789', '987-65-4321']",yes
+dob,"['1990-05-01', '12/25/1985']",yes
+dob_89,"['1990-05-01', '12/25/1985']",yes
+username,"['user123', 'coolguy99']",yes
+username_29,"['user123', 'coolguy99']",yes
+password,"['P@ssw0rd!', 'abc123$%^']",yes
+ip_address,"['192.168.0.1', '8.8.8.8']",yes
+mac_address,"['00:1A:2B:3C:4D:5E', 'AA-BB-CC-DD-EE-FF']",yes
+national_id,"['AB123456C', 'XYZ987654']",yes
+medical_record_number,"['MRN123456', 'MRN789012']",yes
+biometric_data,"['fingerprint_hash', 'iris_scan_123']",yes
+credit_card,"['4111-1111-1111-1111', '5500-0000-0000-0004']",yes
+passport_number,"['X1234567', 'Y7654321']",yes
+driver_license,"['D1234567', 'F7654321']",yes
+student_id,"['S1234567', 'S7654321']",yes
+login_token,"['eyJhbGciOiJIUzI1', 'ZXlKaGJHY2lPaUpJVXpJMU5pSXNJbXRwZEdGMGFXOXVJam9pYkdsd']",yes
+social_handle,"['@bo_dev', '@privacybot']",yes
+linked_profile,"['https://linkedin.com/in/boharris', 'https://facebook.com/bob']",yes
+device_serial_number,"['SN1234567890', 'SN0987654321']",yes
+device_id,"['abc123xyz', 'DEF456UVW']",yes
+emergency_contact,"['Jane Doe', '555-555-1234']",yes
+browser_type,"['Chrome', 'Firefox', 'Safari']",no
+language,"['English', 'Spanish']",no
+country,"['USA', 'Canada']",no
+currency,"['USD', 'CAD']",no
+subscription_type,"['Free', 'Premium']",no
+screen_resolution,"['1920x1080', '1366x768']",no
+feedback_rating,"['4.5', '3.8']",no
+payment_status,"['Paid', 'Pending']",no
+support_tier,"['Gold', 'Silver']",no
+battery_level,"['90%', '45%']",no
+product_id,"['PRD-001', 'XJ920-Z']",no
+order_number,"['ORD00123', 'A98765Z']",no
+favorite_color,"['Red', 'Blue', 'Green']",no
+hobby,"['Reading', 'Gaming', 'Hiking']",no
+device_type,"['iPhone', 'Android', 'Windows PC']",no
+height,"['5\'6""', '170 cm']",no
+weight,"['150 lbs', '70 kg']",no
+age,"['25', '42', '67']",no

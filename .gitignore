@@ -1,0 +1,36 @@
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+*.pyo
+
+# Logs
+*.log
+logs/
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# Model files
+models/*.pkl
+
+# Uploaded / generated files
+uploads/
+redacted/
+
+# Environment config
+.env
+frontend/.env
+
+# IDE/editor config
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# OS-generated files
+Thumbs.db
+ehthumbs.db
