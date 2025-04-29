@@ -1,48 +1,59 @@
+import os
+import secrets
+import logging
+from datetime import datetime, timezone
 
-# ──────────────────────────────────────────────────────────────────────
-# Importing necessary modules and classes
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException,BackgroundTasks, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session 
 from pydantic import BaseModel, EmailStr, Field
 from passlib.context import CryptContext
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+
 from database.database import get_db
 from database.models.user import User
 from database.models.device_token import DeviceToken
-from utils.auth_utils import create_access_token, decode_token
-from datetime import datetime, timedelta, timezone
-import secrets
-import logging
-from sqlalchemy.exc import IntegrityError
+from utils.email import send_verification_email
 
 
-TIER_LIMITS = {
-    "free": 10,
-    "pro": 50,
-    "business": None
-}
 
-router = APIRouter(prefix="/auth", tags=["Register"])
+
+#Toggle this in the backend .env:
+# CREATE_DEVICE_ON_REGISTER=true  (or "false" to delay until after email verification)
+
+CREATE_DEVICE_ON_REGISTER = os.getenv("CREATE_DEVICE_ON_REGISTER", "true").lower() =="true"
+
+router = APIRouter(prefix="/auth", tags=["Authentication"])
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto" )
 
+TIER_LIMITS ={
+        "free": 10,
+        "pro": 50,
+        "business": None
+    }
 
 # User Registration
-
 class RegisterRequest(BaseModel):
-    name: str
+    first_name: str
+    last_name: str
     email: EmailStr
     password: str = Field(min_length=8, description="Password must be at least 8 characters long")
     tier: str = Field(default="free", description="User tier, default is 'free'")
     device_fingerprint: str = Field(..., description="Unique device fingerprint")
+    
+
 
 # ──────────────────────────────────────────────────────────────────────
 # User Registration Endpoint
 # This endpoint allows a new user to register by providing their email, password, and device information.
 # The password is hashed before storing it in the database.
 
-
-@router.post("/register", response_model=dict)
-def register_user(data: RegisterRequest, db: Session = Depends(get_db)):
+@router.post("/register", status_code=status.HTTP_201_CREATED)
+def register_user(
+    data: RegisterRequest, 
+    background_task: BackgroundTasks,
+    db: Session = Depends(get_db),
+    ):
+    
     email = data.email.strip().lower()
     logging.info(f"Registering user: {data.email}")
     existing_user = db.query(User).filter(User.email == data.email).first()

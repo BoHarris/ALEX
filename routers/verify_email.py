@@ -8,7 +8,7 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 @router.get("/verify-email")
 def verify_email(token: str, db: Session = Depends(get_db)):
     #Find user based on token
-    user = db.query(User).filter(User.email_Verification_Token == token).first()
+    user = db.query(User).filter(User.email_verification_token == token).first()
     
     if not user:
         raise HTTPException(status_code=400, detail="Invalid or expired verification link")
