@@ -1,13 +1,14 @@
 import React, { useState, useEffect } from "react";
-import { Button } from "./button";
-import TextField from "./text_input";
 import useFingerprint from "../utils/useFingerprint";
+import { Button } from "../components/button";
+import TextField from "../components/text_input";
 
 function Register() {
-  const [name, setName] = useState("");
-  const [tier, setTier] = useState("free");
+  const [first_name, setFirstName] = useState("");
+  const [last_name, setLastName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [tier, setTier] = useState("free");
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
   const { fingerprint } = useFingerprint();
@@ -19,44 +20,46 @@ function Register() {
   }, [fingerprint]);
 
   const handleRegister = async () => {
+    if (!fingerprint) {
+      setMessage("Still generating device fingerprint—please wait.");
+      return;
+    }
+
     setLoading(true);
     setMessage("");
 
-    const backendUrl = `${process.env.REACT_APP_BACKEND_URL}/auth/register`;
-    console.log("Sending registration to:", backendUrl);
+    const payload = {
+      first_name: first_name,
+      last_name: last_name,
+      email: email.trim().toLowerCase(),
+      password,
+      tier,
+      device_fingerprint: fingerprint,
+    };
 
+    const backendURL =
+      process.env.REACT_APP_BACKEND_URL || "http://localhost:8000";
     try {
-      const res = await fetch(backendUrl, {
+      const res = await fetch(`${backendURL}/auth/register`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          name,
-          email,
-          password,
-          tier,
-          device_fingerprint: fingerprint,
-        }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
       });
 
-      let data;
-      try {
-        data = await res.clone().json();
-      } catch {
-        const fallbackText = await res.text();
-        throw new Error(fallbackText || "Unexpected response from server");
-      }
+      const data = await res.json().catch(async () => {
+        const txt = await res.text();
+        throw new Error(txt || "Unexpected response from server");
+      });
 
       if (!res.ok) {
-        const msg = Array.isArray(data.detail)
+        const errMsg = Array.isArray(data.detail)
           ? data.detail.map((d) => d.msg).join(", ")
           : data.detail || data.message || data.error || "Registration failed";
 
-        throw new Error(msg);
+        throw new Error(errMsg);
       }
 
-      setMessage(data.message || "Registration successful!");
+      setMessage(data.message);
     } catch (err) {
       setMessage("Error registering user: " + err.message);
     } finally {
@@ -67,12 +70,20 @@ function Register() {
   return (
     <div className="flex flex-col gap-4 items-center justify-center py-12 max-w-md mx-auto">
       <TextField
-        id="name"
-        label="Name"
+        id="firstName"
+        label="First Name"
         type="text"
-        value={name}
-        placeholder="Enter your name"
-        onChange={(e) => setName(e.target.value)}
+        value={first_name}
+        placeholder="First Name"
+        onChange={(e) => setFirstName(e.target.value)}
+      />
+      <TextField
+        id="lastName"
+        label="Last Name"
+        type="text"
+        value={last_name}
+        placeholder="Last/SurName"
+        onChange={(e) => setLastName(e.target.value)}
       />
       <TextField
         id="email"

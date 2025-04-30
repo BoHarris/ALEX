@@ -50,31 +50,32 @@ class RegisterRequest(BaseModel):
 @router.post("/register", status_code=status.HTTP_201_CREATED)
 def register_user(
     data: RegisterRequest, 
-    background_task: BackgroundTasks,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     ):
     
     email = data.email.strip().lower()
-    logging.info(f"Registering user: {data.email}")
-    existing_user = db.query(User).filter(User.email == data.email).first()
-    if existing_user:
+    logging.info(f"Registering user: {email}")
+    
+    
+    if db.query(User).filter(User.email == email).first():
         raise HTTPException(status_code=400, detail="Email already registered")
 
-    # Generate the raw token FIRST so we can use it in both places
-    raw_token = secrets.token_hex(32)
-
-    # Hash the password with the token
-    hashed_password = pwd_context.hash(data.password + raw_token)
-    tier = data.tier.lower()
-
-    # Create the user
+    verification_token = secrets.token_urlsafe(32)
+    device_token = secrets.token_urlsafe(32)
+    
+    hashed_password = pwd_context.hash(data.password + device_token)
+    
     new_user = User(
-        name=data.name,
-        email=email,
-        hashed_password=hashed_password,
-        tier=tier
+        first_name = data.first_name,
+        last_name = data.last_name,
+        email = email,
+        hashed_password = hashed_password,
+        tier = data.tier.lower(),
+        is_verified = False,
+        email_verification_token = verification_token,
     )
-
+    
     try:
         db.add(new_user)
         db.commit()
@@ -82,32 +83,37 @@ def register_user(
     except IntegrityError:
         db.rollback()
         raise HTTPException(status_code=400, detail="Email already registered")
-
-    # Set tier-based limits
-    max_devices = TIER_LIMITS.get(tier, 10)
+    
+    max_devices = TIER_LIMITS.get(new_user.tier, 10)
     device_count = db.query(DeviceToken).filter(DeviceToken.user_id == new_user.id).count()
     if max_devices is not None and device_count >= max_devices:
         raise HTTPException(
             status_code=400,
-            detail=f"{data.tier.capitalize()} tier allows {max_devices} device(s)"
+            detail=f"{new_user.tier.capitalize()} tier allows {max_devices} device(s)"
         )
-
-    # Create the device token using the SAME raw_token
-    device_token = DeviceToken(
-        user_id=new_user.id,
-        token=raw_token,
-        device_fingerprint=data.device_fingerprint,
-        created_at=datetime.now(timezone.utc),
-        last_used_at=datetime.now(timezone.utc)
+        
+    send_verification_email(
+        background_tasks,
+        to_email=new_user.email,
+        token=verification_token
     )
-
-    db.add(device_token)
-    db.commit()
-
-    return {
-        "message": "User registered successfully",
-        "user_id": new_user.id,
-        "device_token": device_token.token
-    }
-
     
+    device_row = DeviceToken(
+        user_id = new_user.id,
+        token = device_token,
+        device_fingerprint = data.device_fingerprint,
+        created_at = datetime.now(timezone.utc),
+        last_used_at = datetime.now(timezone.utc),
+    )
+    db.add(device_row)
+    db.commit()
+    
+    return{
+        "message": "Registration successful! Please check your email to verify your account"
+    }
+    
+    
+    
+    
+    
+  
