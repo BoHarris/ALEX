@@ -1,10 +1,4 @@
-from sqlalchemy import (
-    Column, 
-    Integer, 
-    String, 
-    ForeignKey, 
-    DateTime,
-    UniqueConstraint,)
+from sqlalchemy import Column, Integer, String, ForeignKey, DateTime
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 from database.database import Base
@@ -12,9 +6,6 @@ import secrets
 
 class DeviceToken(Base):
     __tablename__ = 'device_tokens'
-    __table_args__ = (
-  UniqueConstraint("user_id", "device_fingerprint", name="uq_user_device"),
-)
     
     id = Column(Integer, primary_key=True, index =True)
     user_id = Column(Integer, ForeignKey('users.id'))

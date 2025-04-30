@@ -1,5 +1,4 @@
-import { React, useEffect, useState } from "react";
-import useFingerprint from "../utils/useFingerprint";
+import { React, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "../components/button";
 
@@ -8,29 +7,22 @@ function LoginForm() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
-  const { fingerprint } = useFingerprint();
   const navigate = useNavigate();
-
-  useEffect(() => {
-    if (fingerprint) {
-      console.log("Fingerprint loaded:: ", fingerprint);
-    }
-  }, [fingerprint]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!fingerprint) {
-      setError("Device fingerprint not ready yet, please wait a moment.");
-    }
-
     setLoading(true);
     setError(null); // Reset any previous errors
 
+    console.log(
+      "Sending login request to:",
+      `${process.env.REACT_APP_BACKEND_URL}/auth/token`
+    );
+
     const formData = new URLSearchParams();
-    formData.append("username", email.trim().toLowerCase());
+    formData.append("username", email);
     formData.append("password", password);
     formData.append("grant_type", "password");
-    formData.append("device_fingerprint", fingerprint);
 
     try {
       const res = await fetch(
@@ -42,19 +34,23 @@ function LoginForm() {
         }
       );
 
-      const data = await res.json().catch(async () => {
-        const txt = await res.text();
-        throw new Error(txt || "Unexpected response from server");
-      });
-
-      if (!res.ok) {
-        throw new Error(data.detail || data.error || "Login failed");
+      let data;
+      try {
+        data = await res.clone().json();
+      } catch {
+        const fallbackText = await res.text();
+        throw new Error(fallbackText || "Unexpected response from server");
       }
 
-      localStorage.setItem("access_token", data.access_token);
+      if (!res.ok) {
+        throw new Error(data.detail || "Login failed");
+      }
+
+      const { access_token } = data;
+      localStorage.setItem("access_token", access_token);
       navigate("/dashboard");
-    } catch (err) {
-      setError(err.message);
+    } catch (error) {
+      setError(error.message);
     } finally {
       setLoading(false);
     }
