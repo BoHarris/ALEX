@@ -3,6 +3,7 @@ from database.database import Base
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from sqlalchemy import ForeignKey
+from database.models.company import Company
 
 class User(Base):
     __tablename__ = "users"
@@ -32,4 +33,4 @@ class User(Base):
         
     #Relationship to company
     company_id = Column(Integer, ForeignKey("companies.id"), nullable= True)
-    company = relationship("Company", back_populates="users")
+    company = relationship(Company, back_populates="users")

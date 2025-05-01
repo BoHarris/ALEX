@@ -1,16 +1,19 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime
+from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, UniqueConstraint
 from sqlalchemy.orm import relationship
-from datetime import datetime, timezone
+from sqlalchemy.sql import func
 from database.database import Base
-import secrets
 
 class DeviceToken(Base):
-    __tablename__ = 'device_tokens'
-    
-    id = Column(Integer, primary_key=True, index =True)
-    user_id = Column(Integer, ForeignKey('users.id'))
-    token = Column(String, unique=True, default=lambda: secrets.token_hex(32))
-    device_fingerprint = Column(String, nullable=False) 
-    created_at = Column(DateTime, default=datetime.now(timezone.utc))
-    last_used_at = Column(DateTime, default=datetime.now(timezone.utc))
+    __tablename__ = "device_tokens"
+    __table_args__ = (
+        UniqueConstraint("user_id", "device_fingerprint", name="uq_user_fingerprint"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    token = Column(String, unique=True, index=True, nullable=False)
+    device_fingerprint = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=func.now(), nullable=False)
+    last_used_at      = Column(DateTime(timezone=True), default=func.now(), onupdate=func.now(), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
     user = relationship("User", back_populates="device_tokens")

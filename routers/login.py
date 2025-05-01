@@ -15,8 +15,8 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 #Token TTL
-ACCESS_TOKEN_TTL = os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES")
-REFRESH_TOKEN_TTL = os.getenv("REFRESH_TOKEN_EXPIRE_MINUTES")
+ACCESS_TOKEN_TTL = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15"))
+REFRESH_TOKEN_TTL = int(os.getenv("REFRESH_TOKEN_EXPIRE_MINUTES", "1440"))
 
 @router.post("/token", response_model=dict)
 def login(
@@ -50,7 +50,7 @@ def login(
         raise HTTPException(status_code=400, detail="Invalid credentials")
     
     access_token = create_access_token(
-        data={"sub": str(user.id)},
+        data={"sub": str(user.email)},
         expires_delta=timedelta(minutes=ACCESS_TOKEN_TTL)
     )
     refresh_token = create_access_token(

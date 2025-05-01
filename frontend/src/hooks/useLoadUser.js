@@ -7,9 +7,9 @@ export function useCurrentUser() {
   useEffect(() => {
     async function loadUser() {
       try {
-        const res = await fetch("/protected/me", {
+        const res = await fetch(`${process.env.REACT_APP_BACKEND_URL}`, {
           headers: {
-            Authorization: `Bearer ${localStorage.getItem("access_token")}`,
+            Autherization: `Bearer ${localStorage.getItem("access_token")}`,
           },
         });
         if (!res.ok) {
