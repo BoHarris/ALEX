@@ -5,7 +5,7 @@ import logging
 import os
 from database.database import Base, engine
 from routers import register,login, protected, logout, refresh, demo  
-from routers.predict_router import router as predict_router
+from routers.predict import router as predict_router
 from routers.redacted_router import router as redacted_router
 
 

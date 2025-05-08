@@ -1,4 +1,4 @@
-from fastapi import APIRouter, File, UploadFile
+from fastapi import APIRouter, File, UploadFile, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import pandas as pd
@@ -16,6 +16,7 @@ import io
 import json
 import xml.etree.ElementTree as ET
 from PyPDF2 import PdfReader
+from dependencies.tier_guard import enforce_tier_limit
 
 router = APIRouter(prefix="/predict", tags=["Prediction"])
 
@@ -52,7 +53,6 @@ def contains_zip_code_pattern(values):
 def contains_phone_pattern(values):
     return any(PHONE_RE.search(str(value)) for value in values) if values else False
 
-
 class PredictionResult(BaseModel):
     filename: str
     pii_columns: list[str]
@@ -62,7 +62,8 @@ class PredictionResult(BaseModel):
     total_values: int
 
 @router.post("/", response_model=PredictionResult)
-async def predict(file: UploadFile = File(...)):
+async def predict(file: UploadFile = File(...), 
+                  user_info:dict = Depends(enforce_tier_limit)):
     file_id = str(uuid.uuid4())
     ext = os.path.splitext(file.filename)[1]
     if ext.lower() not in SUPPORTED_EXTENSIONS:

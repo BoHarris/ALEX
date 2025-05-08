@@ -14,21 +14,23 @@ def secure_area(
     token: str = Depends(oauth2_scheme),
      db: Session = Depends(get_db)           
      ):
-    payload = decode_token(token)
-    if not payload:
+    try: 
+        payload = decode_token(token)
+    except:
         raise HTTPException(status_code=401, detail="Invalid token")
     
     user_id = payload.get("sub")
     device_token = payload.get("device_token")
+    tier = payload.get("tier", "free")
     if not device_token:
         raise HTTPException(status_code=401, detail="Invalid token")
     
-    user_obj = db.query(User).get(int(user_id))
+    user_obj = db.query(User).filter(User.id == user_id).first()
     if not user_obj:
         raise HTTPException(status_code=404, detail="User not found")
     
     refreshed_token = create_access_token(
-        data={"sub": user_id, "device_token": device_token},
+        data={"sub": user_id, "device_token": device_token, "tier": tier},
         expires_delta=timedelta(minutes=30)
     )
     
@@ -37,5 +39,6 @@ def secure_area(
         "user_id": user_id, 
         "name": user_obj.name,
         "device_token": device_token, 
+        "tier": tier,
         "refreshed_access_token": refreshed_token}
 
