@@ -1,5 +1,8 @@
 import React from "react";
 import AnimatedLoginSVG from "../components/animatedHeading";
+import PiiSentinelUI from "../components/PiiSentinelUI";
+
+import { SUPPORTED_EXTENSIONS } from "../utils/constants";
 function Home() {
   return (
     <div className="min-h-screen bg-gray-900 flex flex-col items-center justify-center text-white">
@@ -8,6 +11,7 @@ function Home() {
         ALEX is your privacy-sidekick, helping you detect and redact PII while
         enhancing data protection. Navigate to your dashboard to get started.
       </p>
+      <PiiSentinelUI allowedTypes={SUPPORTED_EXTENSIONS} />
     </div>
   );
 }
