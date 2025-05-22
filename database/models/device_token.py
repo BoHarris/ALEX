@@ -11,7 +11,7 @@ class DeviceToken(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     token = Column(String, unique=True, index=True, nullable=False)
-    device_fingerprint = Column(String, nullable=False)
+    device_fingerprint = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), default=func.now(), nullable=False)
     last_used_at      = Column(DateTime(timezone=True), default=func.now(), onupdate=func.now(), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
