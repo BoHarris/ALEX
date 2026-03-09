@@ -1,0 +1,46 @@
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+*.pyo
+
+# Logs
+*.log
+logs/
+
+# Virtual environment
+venv/
+env/
+.venv/
+node_modules/
+frontend/node_modules/
+
+# Model files
+models/*.pkl
+
+# Uploaded / generated files
+uploads/
+redacted/
+static/redacted/
+
+# Environment config
+.env
+frontend/.env
+.env.*
+
+# IDE/editor config
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# OS-generated files
+Thumbs.db
+ehthumbs.db
+
+# Database / local runtime artifacts
+*.db
+*.sqlite
+*.sqlite3
+.pytest_cache/
