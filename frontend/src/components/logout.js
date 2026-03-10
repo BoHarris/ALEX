@@ -1,13 +1,14 @@
 import React from "react";
 import { Button } from "../components/button";
 import { useCurrentUser } from "../hooks/useLoadUser";
+import { apiUrl } from "../utils/api";
 
 function LogoutButton() {
   const { user } = useCurrentUser();
 
   const handleLogout = async () => {
     try {
-      const response = await fetch("/auth/logout", {
+      const response = await fetch(apiUrl("/auth/logout"), {
         method: "POST",
         credentials: "include",
       });

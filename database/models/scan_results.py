@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String, ForeignKey, DateTime
 from database.database import Base
 from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
 
 class ScanResult(Base):
     __tablename__ = "scan_results"
@@ -15,6 +16,9 @@ class ScanResult(Base):
     total_pii_found = Column(Integer, nullable=False)
     redacted_file_path = Column(String, nullable=True)
     scanned_at = Column(DateTime, server_default=func.now(), nullable=False)
+    
+    user = relationship("User")
+    company = relationship("Company")
     
     
 

@@ -25,7 +25,7 @@ const subtitleVariants = {
 };
 
 const AnimatedLandingHeader = () => {
-  const header = "Welcome to Alex.ai".split("");
+  const header = "Welcome to ALEX".split("");
 
   return (
     <div className="text-center mt-16">
@@ -39,7 +39,7 @@ const AnimatedLandingHeader = () => {
           <motion.span
             key={index}
             variants={letterVariants}
-            className={char === "." ? "text-red-400" : ""}
+            className=""
           >
             {char}
           </motion.span>

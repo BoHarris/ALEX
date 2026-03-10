@@ -13,7 +13,7 @@ function AnimatedLoginSVG() {
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 1.2 }}
       >
-        Login to Alex.<tspan fill="#f87171">ai</tspan>
+        Welcome to ALEX
       </motion.text>
     </svg>
   );

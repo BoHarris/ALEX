@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { Button } from "../components/button";
 import TextField from "../components/text_input";
+import { apiUrl } from "../utils/api";
 
 function base64UrlToUint8Array(base64Url) {
   const padding = "=".repeat((4 - (base64Url.length % 4)) % 4);
@@ -51,6 +52,7 @@ function Register() {
   const [first_name, setFirstName] = useState("");
   const [last_name, setLastName] = useState("");
   const [email, setEmail] = useState("");
+  const [company_name, setCompanyName] = useState("");
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -58,23 +60,24 @@ function Register() {
     setLoading(true);
     setMessage("");
 
-    const backendURL =
-      process.env.REACT_APP_BACKEND_URL || "http://localhost:8000";
-
     try {
       if (!window.PublicKeyCredential) {
         throw new Error("Passkeys are not supported in this browser.");
       }
 
-      const safeEmail = encodeURIComponent(email.trim().toLowerCase());
-      const safeFirstName = encodeURIComponent(first_name.trim());
-      const safeLastName = encodeURIComponent(last_name.trim());
-
       const optionsRes = await fetch(
-        `${backendURL}/auth/webauthn/register/options?email=${safeEmail}&first_name=${safeFirstName}&last_name=${safeLastName}`,
+        apiUrl("/auth/webauthn/register/options"),
         {
           method: "POST",
+          headers: { "Content-Type": "application/json" },
           credentials: "include",
+          body: JSON.stringify({
+            email: email.trim().toLowerCase(),
+            first_name: first_name.trim(),
+            last_name: last_name.trim(),
+            company_name: company_name.trim() || null,
+            create_company: Boolean(company_name.trim()),
+          }),
         }
       );
       const optionsData = await optionsRes.json();
@@ -96,9 +99,9 @@ function Register() {
       }
 
       const verifyRes = await fetch(
-        `${backendURL}/auth/webauthn/register/verify?user_id=${encodeURIComponent(
-          userId
-        )}`,
+        apiUrl(
+          `/auth/webauthn/register/verify?user_id=${encodeURIComponent(userId)}`
+        ),
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -128,46 +131,65 @@ function Register() {
   };
 
   return (
-    <div className="flex flex-col gap-4 items-center justify-center py-12 max-w-md mx-auto">
-      <TextField
-        id="firstName"
-        label="First_Name"
-        type="text"
-        value={first_name}
-        placeholder="First Name"
-        onChange={(e) => setFirstName(e.target.value)}
-      />
-      <TextField
-        id="lastName"
-        label="Last_name"
-        type="text"
-        value={last_name}
-        placeholder="Last Name"
-        onChange={(e) => setLastName(e.target.value)}
-      />
-      <TextField
-        id="email"
-        label="Email"
-        type="email"
-        value={email}
-        placeholder="you@example.com"
-        onChange={(e) => setEmail(e.target.value)}
-      />
-      <Button onClick={handleRegister} disabled={loading}>
-        {loading ? "Registering..." : "Register Passkey"}
-      </Button>
+    <div className="min-h-[70vh] flex items-center justify-center px-4">
+      <div className="w-full max-w-md rounded-xl border border-zinc-700 bg-zinc-900/70 p-6 flex flex-col gap-4">
+        <p className="text-sm text-zinc-300">
+          ALEX uses passkeys instead of passwords for secure authentication.
+          You will be asked to create a passkey on your device.
+        </p>
 
-      {message && (
-        <div
-          className={`text-sm text-center ${
-            message.toLowerCase().includes("success")
-              ? "text-green-400"
-              : "text-red-400"
-          }`}
-        >
-          {message}
-        </div>
-      )}
+        <TextField
+          id="firstName"
+          label="First Name"
+          type="text"
+          value={first_name}
+          placeholder="First Name"
+          onChange={(e) => setFirstName(e.target.value)}
+        />
+        <TextField
+          id="lastName"
+          label="Last Name"
+          type="text"
+          value={last_name}
+          placeholder="Last Name"
+          onChange={(e) => setLastName(e.target.value)}
+        />
+        <TextField
+          id="email"
+          label="Email"
+          type="email"
+          value={email}
+          placeholder="you@example.com"
+          onChange={(e) => setEmail(e.target.value)}
+        />
+        <TextField
+          id="companyName"
+          label="Company Name (Optional)"
+          type="text"
+          value={company_name}
+          placeholder="Company Name (Optional)"
+          onChange={(e) => setCompanyName(e.target.value)}
+        />
+
+        <Button onClick={handleRegister} disabled={loading}>
+          {loading ? "Registering..." : "Create Account with Passkey"}
+        </Button>
+        <p className="text-xs text-zinc-400 text-center">
+          No passwords. No tracking. Authentication stays on your device.
+        </p>
+
+        {message && (
+          <div
+            className={`text-sm text-center ${
+              message.toLowerCase().includes("success")
+                ? "text-green-400"
+                : "text-red-400"
+            }`}
+          >
+            {message}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

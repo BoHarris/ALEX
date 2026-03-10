@@ -7,7 +7,7 @@ function Navbar() {
     <nav className="bg-gray-900 text-white px-6 py-4 shadow-md flex justify-between items-center">
       <div className="text-xl font-bold tracking-wide">
         <Link to="/">
-          ALEX<span className="text-red-400">.ai</span>
+          ALEX
         </Link>
       </div>
       <div className="space-x-4">
@@ -16,12 +16,6 @@ function Navbar() {
           className="hover:text-blue-300 transition-colors duration-200 ml-6 @media (max-width: 768px) { margin-left: 0; }"
         >
           Home
-        </Link>
-        <Link
-          to="/upload"
-          className="hover:text-blue-300 transition-colors duration-200 ml-6 @media (max-width: 768px) { margin-left: 0; }"
-        >
-          Upload
         </Link>
         <Link
           to="/register"

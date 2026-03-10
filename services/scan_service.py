@@ -5,7 +5,6 @@ import logging
 import mimetypes
 import os
 import re
-import shutil
 import uuid
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -294,7 +293,6 @@ def run_scan_pipeline(
         raise ValueError("Unsupported file type.")
 
     os.makedirs("redacted", exist_ok=True)
-    os.makedirs("static/redacted", exist_ok=True)
 
     df = _parse_to_dataframe(file_bytes=file_bytes, filename=filename, ext=ext)
     x, features = _build_feature_dataframe(df)
@@ -342,9 +340,6 @@ def run_scan_pipeline(
     redacted_path = os.path.join("redacted", f"redacted_{file_id}{ext}")
     _write_redacted_file(redacted_df=redacted_df, redacted_path=redacted_path, ext=ext)
 
-    public_redacted_path = os.path.join("static", "redacted", os.path.basename(redacted_path))
-    shutil.copyfile(redacted_path, public_redacted_path)
-
     risk_score = round(min(total_redacted / total_values, 1.0), 2) if total_values > 0 else 0.0
 
     scan_id = _persist_scan_result(
@@ -354,13 +349,13 @@ def run_scan_pipeline(
         risk_score=risk_score,
         pii_columns=pii_columns,
         total_redacted=total_redacted,
-        public_redacted_path=public_redacted_path,
+        public_redacted_path=redacted_path,
     )
 
     return ScanPipelineResult(
         filename=filename,
         pii_columns=pii_columns,
-        redacted_file=public_redacted_path,
+        redacted_file=redacted_path,
         risk_score=risk_score,
         redacted_count=total_redacted,
         total_values=total_values,

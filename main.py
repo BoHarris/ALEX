@@ -1,4 +1,6 @@
 import logging
+import uuid
+from sqlalchemy import text
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -19,21 +21,43 @@ from database.models.user import User
 from services.startup_validation import run_startup_validations
 import database.models  # registers models
 
-os.makedirs("logs", exist_ok=True)
+logger = logging.getLogger(__name__)
 
 logging.basicConfig(
     filename="logs/api.log", 
     level=logging.INFO, 
     format='%(asctime)s - %(message)s')
 
+
+def _ensure_sqlite_user_role_column() -> None:
+    """
+    Idempotent SQLite schema patch: add users.role if it does not exist.
+    """
+    if engine.dialect.name != "sqlite":
+        return
+
+    with engine.begin() as conn:
+        columns = conn.execute(text("PRAGMA table_info(users)")).fetchall()
+        column_names = {row[1] for row in columns}
+        if "role" not in column_names:
+            conn.execute(
+                text("ALTER TABLE users ADD COLUMN role VARCHAR NOT NULL DEFAULT 'member'")
+            )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
+    _ensure_sqlite_user_role_column()
     run_startup_validations()
     
     os.makedirs("uploads", exist_ok=True)
     os.makedirs("redacted", exist_ok=True)
+    os.makedirs("logs", exist_ok=True)
     yield
+    
+
+    
 
 app = FastAPI(
     title="PII Sentinel", 
@@ -43,7 +67,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -54,16 +78,31 @@ app.include_router(webauthn_auth_router)
 
 #existing routers
 app.include_router(protected.router)
+app.include_router(protected.companies_router)
 app.include_router(predict_router)
 app.include_router(logout.router)
 app.include_router(refresh.router)
 app.include_router(redacted_router)
 
 @app.exception_handler(Exception)
-async def debug_exception_handler(request: Request, exc: Exception):
-    import traceback
-    traceback.print_exc()
-    return JSONResponse(status_code=500, content={"details": str(exc)})
+async def global_exception_handler(request: Request, exc: Exception):
+    error_id = str(uuid.uuid4())
+    
+    logger.exception(
+        "Unhandled exception | error_id=%s | method=%s | path=%s | client=%s",
+        error_id,
+        request.method,
+        request.url.path,
+        request.client.host if request.client else "unknown",
+    )
+    
+    return JSONResponse(
+        status_code=500, 
+        content={
+            "details": "Internal server error",
+            error_id: "error_id"
+            }
+        )
 
 #SMTP settings
 SMTP_HOST = os.getenv("SMTP_HOST")
@@ -82,4 +121,4 @@ def root():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="localhost", port=8000, reload=True)
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)

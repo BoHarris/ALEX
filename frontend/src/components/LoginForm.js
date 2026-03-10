@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "../components/button";
+import { apiUrl } from "../utils/api";
 
 function base64UrlToUint8Array(base64Url) {
   const padding = "=".repeat((4 - (base64Url.length % 4)) % 4);
@@ -63,11 +64,9 @@ function LoginForm() {
         throw new Error("Passkeys are not supported in this browser.");
       }
 
-      const backendURL =
-        process.env.REACT_APP_BACKEND_URL || "http://localhost:8000";
       const safeEmail = encodeURIComponent(email.trim().toLowerCase());
       const optionsRes = await fetch(
-        `${backendURL}/auth/webauthn/login/options?email=${safeEmail}`,
+        apiUrl(`/auth/webauthn/login/options?email=${safeEmail}`),
         {
           method: "POST",
           credentials: "include",
@@ -85,7 +84,7 @@ function LoginForm() {
       }
 
       const verifyRes = await fetch(
-        `${backendURL}/auth/webauthn/login/verify?email=${safeEmail}`,
+        apiUrl(`/auth/webauthn/login/verify?email=${safeEmail}`),
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -115,8 +114,12 @@ function LoginForm() {
     <div className="flex flex-col gap-4 flex items-center justify-center bg-gray-900 px-4">
       <div className="max-w-md w-full bg-gray-800 p-8 rounded-lg shadow-lg">
         <h2 className="text-3xl font-bold text-white mb-6 text-center">
-          Welcome Back to ALEX.ai
+          Welcome to ALEX
         </h2>
+        <p className="text-gray-300 text-sm text-center mb-6 leading-relaxed">
+          ALEX (Anonymization & Learning EXpert) helps detect and redact personally
+          identifiable information while strengthening privacy protection.
+        </p>
         {error && <p className="text-red-500 mb-4 text-center">{error}</p>}
 
         <form onSubmit={handleSubmit} className="space-y-5">
@@ -144,6 +147,9 @@ function LoginForm() {
           >
             {loading ? "Signing in..." : "Sign in with Passkey"}
           </Button>
+          <p className="text-xs text-gray-400 text-center -mt-1">
+            Secure passwordless sign-in using your device passkey.
+          </p>
         </form>
 
         <div className="text-gray-400 text-center mt-4">

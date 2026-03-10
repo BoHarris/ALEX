@@ -15,7 +15,7 @@ class User(Base):
     
     hashed_password = Column(String, nullable=True)
     tier = Column(String, default="free", nullable=False)
-    
+    role = Column(String, default="member", nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
     is_superuser = Column(Boolean, default=False, nullable=False)
     
@@ -42,3 +42,4 @@ class User(Base):
     #Relationship to company
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=True)
     company = relationship("Company", back_populates="users")
+    
