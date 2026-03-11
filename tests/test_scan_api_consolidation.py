@@ -18,6 +18,7 @@ from database.models.user import User
 from dependencies.tier_guard import get_current_user_context
 from routers import scans as scans_router
 from services.scan_service import ScanPipelineResult
+from utils.constants import SUPPORTED_EXTENSIONS_SORTED
 
 
 def _make_local_test_dir() -> Path:
@@ -200,3 +201,72 @@ def test_scan_download_and_report_routes_return_assets(monkeypatch):
     finally:
         shutil.rmtree(base, ignore_errors=True)
         session.close()
+
+
+def test_supported_file_types_endpoint_matches_backend_contract():
+    session_factory = _session()
+    app = _build_app(session_factory)
+    client = TestClient(app)
+
+    response = client.get("/scans/supported-file-types")
+
+    assert response.status_code == 200
+    assert response.json()["supported_extensions"] == SUPPORTED_EXTENSIONS_SORTED
+    assert ".xls" in response.json()["supported_extensions"]
+
+
+def test_post_scans_accepts_xls_when_backend_supports_it(monkeypatch):
+    base = _make_local_test_dir()
+    session_factory = _session()
+    app = _build_app(session_factory)
+    client = TestClient(app)
+
+    monkeypatch.chdir(base)
+    monkeypatch.setattr(scans_router, "record_audit_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(scans_router, "register_scan_activity", lambda *args, **kwargs: None)
+    monkeypatch.setattr(scans_router, "reserve_scan_quota", lambda *args, **kwargs: True)
+    monkeypatch.setattr(scans_router, "release_scan_quota_reservation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(scans_router, "extract_request_security_context", lambda request: {})
+
+    async def _inline_run_in_threadpool(func):
+        return func()
+
+    monkeypatch.setattr(scans_router, "run_in_threadpool", _inline_run_in_threadpool)
+    monkeypatch.setattr(
+        scans_router,
+        "run_scan_pipeline",
+        lambda **kwargs: ScanPipelineResult(
+            filename="sheet.xls",
+            pii_columns=[],
+            redacted_file="redacted/redacted_sheet.xls",
+            risk_score=0,
+            redacted_count=0,
+            total_values=0,
+            redacted_type_counts={},
+            scan_id=88,
+        ),
+    )
+
+    try:
+        response = client.post(
+            "/scans",
+            files={"file": ("sheet.xls", b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1rest", "application/vnd.ms-excel")},
+        )
+        assert response.status_code == 200
+        assert response.json()["scan_id"] == 88
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_post_scans_rejects_unsupported_file_type():
+    session_factory = _session()
+    app = _build_app(session_factory)
+    client = TestClient(app)
+
+    response = client.post(
+        "/scans",
+        files={"file": ("archive.exe", b"MZ", "application/octet-stream")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error_code"] == "unsupported_file_type"

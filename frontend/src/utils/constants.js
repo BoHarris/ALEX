@@ -1,7 +1,6 @@
 // constants.js
 export const SUPPORTED_EXTENSIONS = [
   ".csv",
-  ".xlsx",
   ".tsv",
   ".txt",
   ".log",
@@ -10,11 +9,12 @@ export const SUPPORTED_EXTENSIONS = [
   ".docx",
   ".pdf",
   ".html",
+  ".xls",
+  ".xlsx",
 ];
 
 export const FILE_TYPE_LABELS = {
   ".csv": "CSV (Comma Separated)",
-  ".xlsx": "Excel Spreadsheet",
   ".tsv": "TSV (Tab Separated)",
   ".txt": "Text File",
   ".log": "Log File",
@@ -23,4 +23,6 @@ export const FILE_TYPE_LABELS = {
   ".docx": "Word Document",
   ".pdf": "PDF Document",
   ".html": "HTML Page",
+  ".xls": "Excel 97-2003 Spreadsheet",
+  ".xlsx": "Excel Spreadsheet",
 };

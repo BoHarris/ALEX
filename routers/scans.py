@@ -26,7 +26,7 @@ from services.retention_service import apply_retention_state, apply_retention_st
 from services.scan_service import ScanContext, ScanLimitError, run_scan_pipeline
 from services.security_service import extract_request_security_context, register_scan_activity
 from utils.api_errors import error_payload
-from utils.constants import SUPPORTED_EXTENSIONS
+from utils.constants import SUPPORTED_EXTENSIONS, SUPPORTED_EXTENSIONS_SORTED
 from utils.plan_features import get_plan_features
 from utils.rbac import ROLE_ORG_ADMIN, ROLE_SECURITY_ADMIN, has_any_role
 from utils.tier_limiter import release_scan_quota_reservation, reserve_scan_quota
@@ -523,6 +523,11 @@ async def create_scan(
     finally:
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
+
+
+@router.get("/supported-file-types")
+def get_supported_file_types():
+    return {"supported_extensions": SUPPORTED_EXTENSIONS_SORTED}
 
 
 @router.get("")
