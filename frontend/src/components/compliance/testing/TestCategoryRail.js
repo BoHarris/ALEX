@@ -37,6 +37,7 @@ export default function TestCategoryRail({ categories, selectedCategory, onSelec
               <StatPill label="Fail" value={item.failing} tone="bg-rose-500/10 text-rose-300" />
               <StatPill label="Flaky" value={item.flaky} tone="bg-cyan-500/10 text-cyan-200" />
               <StatPill label="Skip" value={item.skipped} tone="bg-amber-500/10 text-amber-200" />
+              <StatPill label="Not run" value={item.not_run || 0} tone="bg-amber-500/10 text-amber-100" />
             </div>
             <div className="mt-4 flex items-center justify-between text-xs text-app-muted">
               <span>{item.total_tests} tests</span>

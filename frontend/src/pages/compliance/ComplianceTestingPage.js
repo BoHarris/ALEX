@@ -30,6 +30,7 @@ export default function ComplianceTestingPage() {
   } = useCompliancePageContext();
   const [selectedCategory, setSelectedCategory] = useState(null);
   const [search, setSearch] = useState("");
+  const [filePathFilter, setFilePathFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [sort, setSort] = useState("last_run");
   const [interactionError, setInteractionError] = useState(null);
@@ -55,6 +56,7 @@ export default function ComplianceTestingPage() {
         setInteractionError(null);
         await loadTestCategory(selectedCategory, {
           search: search.trim() || undefined,
+          file_path: filePathFilter.trim() || undefined,
           status: statusFilter || undefined,
           sort,
         });
@@ -69,7 +71,7 @@ export default function ComplianceTestingPage() {
     return () => {
       cancelled = true;
     };
-  }, [loadTestCategory, search, selectedCategory, sort, statusFilter]);
+  }, [filePathFilter, loadTestCategory, search, selectedCategory, sort, statusFilter]);
 
   const categorySummary = useMemo(() => {
     const summary = testCategoryDetail?.summary || {};
@@ -78,6 +80,7 @@ export default function ComplianceTestingPage() {
       passing: summary.passing ?? 0,
       failing: summary.failing ?? 0,
       skipped: summary.skipped ?? 0,
+      notRun: summary.not_run ?? 0,
       flaky: summary.flaky ?? 0,
       passRate: summary.average_pass_rate ?? summary.pass_rate ?? 0,
       lastRun: summary.last_run_timestamp ?? selectedCategoryMeta?.last_run_timestamp ?? null,
@@ -137,17 +140,27 @@ export default function ComplianceTestingPage() {
                   <div><p className="text-xs uppercase tracking-[0.18em] text-app-muted">Failing</p><p className="mt-1 text-lg font-semibold text-rose-300">{categorySummary.failing}</p></div>
                   <div><p className="text-xs uppercase tracking-[0.18em] text-app-muted">Skipped</p><p className="mt-1 text-lg font-semibold text-amber-200">{categorySummary.skipped}</p></div>
                   <div><p className="text-xs uppercase tracking-[0.18em] text-app-muted">Flaky</p><p className="mt-1 text-lg font-semibold text-cyan-200">{categorySummary.flaky}</p></div>
+                  <div><p className="text-xs uppercase tracking-[0.18em] text-app-muted">Not Run</p><p className="mt-1 text-lg font-semibold text-amber-200">{categorySummary.notRun}</p></div>
                   <div><p className="text-xs uppercase tracking-[0.18em] text-app-muted">Last Run</p><p className="mt-1 text-sm font-medium text-app-secondary">{formatDateTime(categorySummary.lastRun)}</p></div>
                 </div>
               </div>
 
-              <div className="mt-4 grid gap-3 lg:grid-cols-[1.5fr_1fr_1fr]">
+              <div className="mt-4 grid gap-3 lg:grid-cols-[1.2fr_1.1fr_1fr_1fr]">
                 <label className="flex flex-col gap-2 text-sm text-app-secondary">
                   <span>Search Tests</span>
                   <input
                     value={search}
                     onChange={(event) => setSearch(event.target.value)}
                     placeholder="Search by name, description, or file"
+                    className="rounded-2xl border border-app bg-app px-3 py-3 text-sm text-app focus-visible:outline-none"
+                  />
+                </label>
+                <label className="flex flex-col gap-2 text-sm text-app-secondary">
+                  <span>File Path</span>
+                  <input
+                    value={filePathFilter}
+                    onChange={(event) => setFilePathFilter(event.target.value)}
+                    placeholder="Filter by tests/path.py"
                     className="rounded-2xl border border-app bg-app px-3 py-3 text-sm text-app focus-visible:outline-none"
                   />
                 </label>
@@ -160,6 +173,7 @@ export default function ComplianceTestingPage() {
                     { value: "passed", label: "Passed" },
                     { value: "failed", label: "Failed" },
                     { value: "skipped", label: "Skipped" },
+                    { value: "not_run", label: "Not Run" },
                     { value: "flaky", label: "Flaky" },
                   ]}
                 />

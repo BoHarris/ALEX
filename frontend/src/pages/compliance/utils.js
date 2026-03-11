@@ -28,7 +28,7 @@ export function statusTone(status = "") {
   if (["completed", "approved", "published", "active", "passed", "stable", "improving"].includes(normalized)) {
     return "text-emerald-600";
   }
-  if (["pending", "investigating", "in_review", "flagged", "skipped"].includes(normalized)) {
+  if (["pending", "investigating", "in_review", "flagged", "skipped", "not_run"].includes(normalized)) {
     return "text-amber-600";
   }
   if (["flaky", "unstable", "running"].includes(normalized)) {
@@ -45,7 +45,7 @@ export function statusBadgeClass(status = "") {
   if (["completed", "approved", "published", "active", "passed", "stable", "improving"].includes(normalized)) {
     return "bg-emerald-500/15 text-emerald-300 border border-emerald-400/30";
   }
-  if (["pending", "investigating", "in_review", "flagged", "skipped"].includes(normalized)) {
+  if (["pending", "investigating", "in_review", "flagged", "skipped", "not_run"].includes(normalized)) {
     return "bg-amber-500/15 text-amber-200 border border-amber-400/30";
   }
   if (["flaky", "unstable", "running"].includes(normalized)) {

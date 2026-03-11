@@ -340,24 +340,24 @@ def ensure_test_runs(db: Session, organization_id: int) -> None:
         matching = [path for path in test_files if key in path.name.lower()]
         seed_cases = [
             (
-                f"{display_name} smoke test",
-                f"tests/test_{key}_smoke.py",
+                f"test_{key}_primary_path",
+                f"tests/test_{key}_suite.py",
                 f"Validates the primary {display_name.lower()} path.",
                 120,
                 "All assertions passed.",
                 None,
             ),
             (
-                f"{display_name} regression guard",
-                f"tests/test_{key}_regression.py",
+                f"test_{key}_regression_guard",
+                f"tests/test_{key}_suite.py",
                 f"Protects the key {display_name.lower()} regressions.",
                 240,
                 "Regression suite executed.",
                 "Expected status 200 but received 500.",
             ),
             (
-                f"{display_name} optional scenario",
-                f"tests/test_{key}_optional.py",
+                f"test_{key}_optional_scenario",
+                f"tests/test_{key}_suite.py",
                 f"Covers optional {display_name.lower()} behavior.",
                 0,
                 "Skipped pending environment prerequisites.",

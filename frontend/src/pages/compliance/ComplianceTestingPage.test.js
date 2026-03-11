@@ -13,6 +13,7 @@ jest.mock("./useCompliancePageContext", () => ({
         passing_tests: 9,
         failing_tests: 2,
         flaky_tests: 1,
+        not_run_tests: 1,
         average_pass_rate: 87,
         total_executions_last_7_days: 34,
       },
@@ -24,40 +25,31 @@ jest.mock("./useCompliancePageContext", () => ({
           passing: 2,
           failing: 1,
           skipped: 0,
+          not_run: 0,
           flaky: 1,
           average_pass_rate: 76,
           status: "failed",
           last_run_timestamp: "2026-03-11T12:00:00+00:00",
-        },
-        {
-          category: "security tests",
-          description: "Authentication and hardening coverage.",
-          total_tests: 3,
-          passing: 3,
-          failing: 0,
-          skipped: 0,
-          flaky: 0,
-          average_pass_rate: 100,
-          status: "passed",
-          last_run_timestamp: "2026-03-10T12:00:00+00:00",
         },
       ],
     },
     testCategoryDetail: {
       category: "privacy tests",
       summary: {
-        total_tests: 2,
+        total_tests: 3,
         passing: 1,
         failing: 1,
         skipped: 0,
+        not_run: 1,
         flaky: 1,
         average_pass_rate: 50,
         last_run_timestamp: "2026-03-11T12:00:00+00:00",
       },
       tests: [
         {
-          test_id: "privacy%20tests%3A%3Adetect_email",
-          test_name: "detect_email",
+          test_id: "tests%2Fprivacy_tests.py%3A%3Atest_detect_email",
+          test_node_id: "tests/privacy_tests.py::test_detect_email",
+          test_name: "test_detect_email",
           category: "privacy tests",
           suite_name: "PII validation suite",
           status: "failed",
@@ -66,13 +58,14 @@ jest.mock("./useCompliancePageContext", () => ({
           failed_runs: 1,
           flake_rate: 1,
           flaky: true,
-          file_name: "tests/test_pii_validation.py",
+          file_path: "tests/privacy_tests.py",
           last_duration_ms: 8,
           last_run_timestamp: "2026-03-11T12:00:00+00:00",
         },
         {
-          test_id: "privacy%20tests%3A%3Adetect_phone",
-          test_name: "detect_phone",
+          test_id: "tests%2Fprivacy_tests.py%3A%3Atest_detect_phone",
+          test_node_id: "tests/privacy_tests.py::test_detect_phone",
+          test_name: "test_detect_phone",
           category: "privacy tests",
           suite_name: "PII validation suite",
           status: "passed",
@@ -81,15 +74,33 @@ jest.mock("./useCompliancePageContext", () => ({
           failed_runs: 0,
           flake_rate: 0,
           flaky: false,
-          file_name: "tests/test_pii_validation.py",
+          file_path: "tests/privacy_tests.py",
           last_duration_ms: 7,
           last_run_timestamp: "2026-03-11T11:00:00+00:00",
+        },
+        {
+          test_id: "tests%2Fprivacy_tests.py%3A%3Atest_detect_ssn",
+          test_node_id: "tests/privacy_tests.py::test_detect_ssn",
+          test_name: "test_detect_ssn",
+          category: "privacy tests",
+          suite_name: "PII validation suite",
+          status: "not_run",
+          pass_rate: 0,
+          total_runs: 0,
+          failed_runs: 0,
+          flake_rate: 0,
+          flaky: false,
+          file_path: "tests/privacy_tests.py",
+          last_duration_ms: null,
+          last_run_timestamp: null,
         },
       ],
     },
     selectedTestCase: {
-      test_id: "privacy%20tests%3A%3Adetect_email",
-      test_name: "detect_email",
+      test_id: "tests%2Fprivacy_tests.py%3A%3Atest_detect_email",
+      test_node_id: "tests/privacy_tests.py::test_detect_email",
+      test_name: "test_detect_email",
+      file_path: "tests/privacy_tests.py",
       category: "privacy tests",
       suite_name: "PII validation suite",
       status: "failed",
@@ -117,19 +128,9 @@ jest.mock("./useCompliancePageContext", () => ({
           duration_ms: 8,
           last_run_timestamp: "2026-03-11T12:00:00+00:00",
           environment: "synthetic_history",
+          file_path: "tests/privacy_tests.py",
           error_message: "Detector missed expected email classification.",
           confidence_score: 0.19,
-        },
-        {
-          run_id: 1,
-          result_id: 21,
-          suite_name: "PII validation suite",
-          status: "passed",
-          duration_ms: 10,
-          last_run_timestamp: "2026-03-10T12:00:00+00:00",
-          environment: "synthetic_history",
-          error_message: null,
-          confidence_score: 0.88,
         },
       ],
     },
@@ -143,35 +144,37 @@ beforeEach(() => {
   mockLoadTestCase.mockClear();
 });
 
-test("renders category rail, summary metrics, and selected test history", async () => {
+test("renders individual tests from the same file separately and shows node metadata", async () => {
   render(<ComplianceTestingPage />);
 
-  expect(screen.getByText("Test Suites")).toBeInTheDocument();
-  expect(screen.getByText("Total Tests")).toBeInTheDocument();
-  expect(screen.getByText("12")).toBeInTheDocument();
-  expect(screen.getByText("privacy tests")).toBeInTheDocument();
-  expect(screen.getByText("detect_email")).toBeInTheDocument();
-  expect(screen.getByText("Execution History")).toBeInTheDocument();
-  expect(screen.getByText("Detector missed expected email classification.")).toBeInTheDocument();
+  expect(screen.getByText("test_detect_email")).toBeInTheDocument();
+  expect(screen.getByText("test_detect_phone")).toBeInTheDocument();
+  expect(screen.getByText("test_detect_ssn")).toBeInTheDocument();
+  expect(screen.getAllByText("tests/privacy_tests.py").length).toBeGreaterThan(0);
+  expect(screen.getByText("Pytest Node ID")).toBeInTheDocument();
+  expect(screen.getByText("tests/privacy_tests.py::test_detect_email")).toBeInTheDocument();
 
   await waitFor(() => {
     expect(mockLoadTestCategory).toHaveBeenCalled();
   });
 });
 
-test("supports selecting a test and changing filters", async () => {
+test("supports selecting a single test case and filtering by search and file path", async () => {
   const user = userEvent.setup();
   render(<ComplianceTestingPage />);
 
-  await user.click(screen.getByText("detect_phone"));
-  expect(mockLoadTestCase).toHaveBeenCalledWith("privacy%20tests%3A%3Adetect_phone");
+  await user.click(screen.getByText("test_detect_phone"));
+  expect(mockLoadTestCase).toHaveBeenCalledWith("tests%2Fprivacy_tests.py%3A%3Atest_detect_phone");
 
   await user.type(screen.getByPlaceholderText("Search by name, description, or file"), "email");
+  await user.type(screen.getByPlaceholderText("Filter by tests/path.py"), "privacy_tests.py");
+
   await waitFor(() => {
     expect(mockLoadTestCategory).toHaveBeenLastCalledWith(
       "privacy tests",
       expect.objectContaining({
         search: "email",
+        file_path: "privacy_tests.py",
         sort: "last_run",
       }),
     );
