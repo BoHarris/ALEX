@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from database.models.compliance_test_case_result import ComplianceTestCaseResult
 from database.models.compliance_test_run import ComplianceTestRun
+from services.test_failure_task_service import get_failure_task_for_test
 from services.test_discovery_service import (
     build_test_node_id,
     discover_pytest_cases,
@@ -119,15 +120,36 @@ def _compute_flake_rate(history: list[dict[str, object]]) -> float:
     return round(transitions / (len(terminal_statuses) - 1), 2)
 
 
+def _compute_quality_label(
+    history: list[dict[str, object]],
+    *,
+    current_fail_streak: int,
+    current_pass_streak: int,
+    flaky: bool,
+) -> str:
+    if not history:
+        return "Not Run"
+    latest_status = history[0]["status"]
+    if latest_status == "failed":
+        return "Regressed" if current_fail_streak == 1 else "Failing"
+    if latest_status == "passed" and current_pass_streak >= 1 and any(item["status"] == "failed" for item in history[1:4]):
+        return "Improving"
+    if flaky:
+        return "Flaky"
+    if latest_status == "skipped":
+        return "Skipped"
+    return "Stable"
+
+
 def _compute_trend(history: list[dict[str, object]]) -> str:
     statuses = [item["status"] for item in history if item["status"] in {"passed", "failed"}]
-    if len(set(statuses[:5])) > 1:
-        return "unstable"
-    if statuses[:3] == ["passed", "passed", "passed"] and "failed" in statuses[3:]:
+    if not statuses:
+        return "not_run"
+    if statuses[0] == "failed":
+        return "regressed" if any(status == "passed" for status in statuses[1:5]) else "failing"
+    if statuses[0] == "passed" and any(status == "failed" for status in statuses[1:4]):
         return "improving"
-    if statuses and statuses[0] == "failed" and "passed" in statuses[1:4]:
-        return "degrading"
-    if len(set(statuses)) > 1:
+    if len(set(statuses[:5])) > 1:
         return "unstable"
     return "stable"
 
@@ -135,7 +157,11 @@ def _compute_trend(history: list[dict[str, object]]) -> str:
 def _summarize_test_history(node_id: str, rows: list[tuple[ComplianceTestCaseResult, ComplianceTestRun]]) -> dict[str, object]:
     ordered_rows = sorted(
         rows,
-        key=lambda row: (_coerce_datetime(row[0].last_run_at) or _coerce_datetime(row[1].run_at) or datetime.min.replace(tzinfo=timezone.utc)),
+        key=lambda row: (
+            _coerce_datetime(row[0].last_run_at) or _coerce_datetime(row[1].run_at) or datetime.min.replace(tzinfo=timezone.utc),
+            row[1].id,
+            row[0].id,
+        ),
         reverse=True,
     )
     history = [_history_row(case, run) for case, run in ordered_rows]
@@ -155,6 +181,12 @@ def _summarize_test_history(node_id: str, rows: list[tuple[ComplianceTestCaseRes
     current_fail_streak = _compute_streak(history, "failed")
     flake_rate = _compute_flake_rate(history)
     flaky = passed_runs > 0 and failed_runs > 0
+    quality_label = _compute_quality_label(
+        history,
+        current_fail_streak=current_fail_streak,
+        current_pass_streak=current_pass_streak,
+        flaky=flaky,
+    )
 
     return {
         "test_id": encode_test_id(node_id=node_id, test_name=latest_case.name),
@@ -177,6 +209,7 @@ def _summarize_test_history(node_id: str, rows: list[tuple[ComplianceTestCaseRes
         "pass_rate": pass_rate,
         "flake_rate": flake_rate,
         "flaky": flaky,
+        "quality_label": quality_label,
         "average_duration_ms": average_duration,
         "last_duration_ms": latest_case.duration_ms,
         "last_run_timestamp": history[0]["last_run_timestamp"],
@@ -343,7 +376,9 @@ def get_managed_test_detail(db: Session, *, organization_id: int, test_id: str) 
     inventory = _build_test_inventory(db, organization_id=organization_id)
     for item in inventory:
         if item["test_node_id"] == node_id:
-            return item
+            detail = dict(item)
+            detail["task"] = get_failure_task_for_test(db, organization_id=organization_id, test_node_id=node_id)
+            return detail
     raise ValueError("Test not found")
 
 

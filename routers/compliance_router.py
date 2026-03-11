@@ -39,6 +39,7 @@ from services.compliance_service import (
     add_attachment,
     create_compliance_record,
     ensure_default_company_and_employee,
+    ensure_test_runs,
     log_compliance_audit,
     serialize_compliance_record,
     serialize_employee,
@@ -57,6 +58,7 @@ from services.test_management_service import (
     get_test_management_dashboard,
     list_managed_tests,
 )
+from services.test_failure_task_service import ensure_failure_task_for_test, get_failure_task_for_test, update_failure_task
 from services.test_discovery_service import build_test_node_id, normalize_test_file_path, split_test_node_id
 from utils.api_errors import error_payload
 
@@ -314,6 +316,17 @@ class TestResultCreateRequest(BaseModel):
     error_message: str | None = None
 
 
+class TestFailureTaskCreateRequest(BaseModel):
+    priority: str | None = "medium"
+    assignee_employee_id: int | None = None
+
+
+class TestFailureTaskUpdateRequest(BaseModel):
+    status: str | None = None
+    priority: str | None = None
+    assignee_employee_id: int | None = None
+
+
 class AccessReviewCreateRequest(WorkflowPayload):
     reviewed_employee_id: int
     permissions_snapshot: dict = Field(default_factory=dict)
@@ -449,6 +462,7 @@ class CodeReviewDecisionRequest(BaseModel):
 @router.get("/me")
 def get_current_employee(current_employee: dict = Depends(require_employee_context), db: Session = Depends(get_db)):
     ensure_default_company_and_employee(db)
+    ensure_test_runs(db, current_employee["organization_id"])
     employees = db.query(Employee).filter(Employee.company_id == current_employee["organization_id"]).order_by(Employee.first_name.asc()).all()
     company = db.query(Company).filter(Company.id == current_employee["organization_id"]).first()
     return {
@@ -1001,6 +1015,7 @@ def update_vendor(vendor_id: int, payload: VendorUpdateRequest, current_employee
 
 @router.get("/tests/dashboard")
 def get_test_dashboard(current_employee: dict = Depends(require_compliance_workspace_access), db: Session = Depends(get_db)):
+    ensure_test_runs(db, current_employee["organization_id"])
     return get_test_management_dashboard(db, organization_id=current_employee["organization_id"])
 
 
@@ -1071,6 +1086,17 @@ def get_test_case_detail(test_id: str, current_employee: dict = Depends(require_
         payload["last_execution_time"] = payload.pop("last_run_timestamp")
         payload["output"] = payload.pop("output_summary")
         payload["error_message"] = payload.pop("error_details")
+        payload["task"] = ensure_failure_task_for_test(
+            db,
+            organization_id=current_employee["organization_id"],
+            test_node_id=payload["test_node_id"],
+        ) if payload.get("status") == "failed" else get_failure_task_for_test(
+            db,
+            organization_id=current_employee["organization_id"],
+            test_node_id=payload["test_node_id"],
+        )
+        if payload.get("status") == "failed":
+            db.commit()
         return payload
 
     try:
@@ -1086,6 +1112,13 @@ def get_test_case_detail(test_id: str, current_employee: dict = Depends(require_
     detail["last_execution_time"] = detail.get("last_run_timestamp")
     detail["output"] = detail.get("latest_execution", {}).get("output")
     detail["error_message"] = detail.get("latest_execution", {}).get("error_message")
+    if detail.get("status") == "failed" and detail.get("task") is None:
+        detail["task"] = ensure_failure_task_for_test(
+            db,
+            organization_id=current_employee["organization_id"],
+            test_node_id=detail["test_node_id"],
+        )
+        db.commit()
     return detail
 
 
@@ -1163,9 +1196,90 @@ def create_test_result(
         duration_ms=payload.duration_ms,
         output=payload.output,
         error_message=payload.error_message,
+        created_by_employee_id=current_employee["employee_id"],
+        created_by_user_id=current_employee["user_id"],
     )
     db.commit()
     return _serialize_test_case(result, run)
+
+
+@router.get("/tests/cases/{test_id}/task")
+def get_test_case_task(test_id: str, current_employee: dict = Depends(require_compliance_workspace_access), db: Session = Depends(get_db)):
+    test_id_value = str(test_id)
+    if test_id_value.isdigit():
+        case = (
+            db.query(ComplianceTestCaseResult, ComplianceTestRun)
+            .join(ComplianceTestRun, ComplianceTestRun.id == ComplianceTestCaseResult.test_run_id)
+            .filter(ComplianceTestCaseResult.id == int(test_id_value), ComplianceTestRun.organization_id == current_employee["organization_id"])
+            .first()
+        )
+        if not case:
+            raise HTTPException(status_code=404, detail=error_payload(detail="Test case not found", error_code="not_found"))
+        result, run = case
+        test_node_id = build_test_node_id(test_name=result.name, file_path=result.file_name, category=run.category)
+    else:
+        try:
+            detail = get_managed_test_detail(db, organization_id=current_employee["organization_id"], test_id=test_id_value)
+        except ValueError:
+            raise HTTPException(status_code=404, detail=error_payload(detail="Test case not found", error_code="not_found"))
+        test_node_id = detail["test_node_id"]
+
+    task = get_failure_task_for_test(db, organization_id=current_employee["organization_id"], test_node_id=test_node_id)
+    return {"task": task}
+
+
+@router.post("/tests/cases/{test_id}/task")
+def create_or_update_test_case_task(
+    test_id: str,
+    payload: TestFailureTaskCreateRequest,
+    current_employee: dict = Depends(require_security_or_compliance_admin),
+    db: Session = Depends(get_db),
+):
+    detail = get_test_case_detail(test_id, current_employee=current_employee, db=db)
+    task = detail.get("task")
+    if task is None and detail.get("status") == "failed":
+        task = ensure_failure_task_for_test(
+            db,
+            organization_id=current_employee["organization_id"],
+            test_node_id=detail["test_node_id"],
+        )
+    if task is None:
+        raise HTTPException(status_code=409, detail=error_payload(detail="Task can only be created for failing tests", error_code="conflict"))
+    updated = update_failure_task(
+        db,
+        organization_id=current_employee["organization_id"],
+        task_id=task["id"],
+        actor_employee_id=current_employee["employee_id"],
+        actor_user_id=current_employee["user_id"],
+        priority=payload.priority,
+        assignee_employee_id=payload.assignee_employee_id,
+    )
+    db.commit()
+    return {"task": updated}
+
+
+@router.patch("/tests/tasks/{task_id}")
+def patch_test_failure_task(
+    task_id: int,
+    payload: TestFailureTaskUpdateRequest,
+    current_employee: dict = Depends(require_security_or_compliance_admin),
+    db: Session = Depends(get_db),
+):
+    try:
+        updated = update_failure_task(
+            db,
+            organization_id=current_employee["organization_id"],
+            task_id=task_id,
+            actor_employee_id=current_employee["employee_id"],
+            actor_user_id=current_employee["user_id"],
+            status=payload.status,
+            priority=payload.priority,
+            assignee_employee_id=payload.assignee_employee_id,
+        )
+    except ValueError:
+        raise HTTPException(status_code=404, detail=error_payload(detail="Failure task not found", error_code="not_found"))
+    db.commit()
+    return {"task": updated}
 
 
 @router.get("/tests/results")

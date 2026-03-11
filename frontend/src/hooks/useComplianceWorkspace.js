@@ -105,6 +105,27 @@ export function useComplianceWorkspace(enabled = true) {
     return nextDetail;
   }, []);
 
+  const createOrAssignTestTask = useCallback(async (caseId, payload = {}) => {
+    await requestComplianceJson(`/compliance/tests/cases/${encodeURIComponent(caseId)}/task`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return loadTestCase(caseId);
+  }, [loadTestCase]);
+
+  const updateTestTask = useCallback(async (taskId, payload = {}) => {
+    await requestComplianceJson(`/compliance/tests/tasks/${taskId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (selectedTestCase?.test_id) {
+      return loadTestCase(selectedTestCase.test_id);
+    }
+    return null;
+  }, [loadTestCase, selectedTestCase?.test_id]);
+
   const loadTestDashboard = useCallback(async () => {
     const dashboard = await requestComplianceJson("/compliance/tests/dashboard");
     setTestDashboard(dashboard);
@@ -161,6 +182,8 @@ export function useComplianceWorkspace(enabled = true) {
     loadTestDashboard,
     loadTestInventory,
     loadTestCase,
+    createOrAssignTestTask,
+    updateTestTask,
     refreshTestingWorkspace,
     loadRecordTimeline,
     createEmployee: (payload) => mutate("/compliance/directory", payload),

@@ -43,6 +43,7 @@ REQUIRED_SCHEMA = {
     "vendors": {"id", "compliance_record_id", "vendor_name", "service_category", "security_review_status"},
     "compliance_test_runs": {"id", "organization_id", "category", "suite_name", "dataset_name", "status", "total_tests", "passed_tests", "failed_tests", "accuracy_score", "run_at"},
     "compliance_test_case_results": {"id", "test_run_id", "name", "dataset_name", "expected_result", "actual_result", "status", "confidence_score", "last_run_at"},
+    "compliance_test_failure_tasks": {"id", "compliance_record_id", "organization_id", "test_node_id", "latest_failed_run_id", "latest_failed_result_id", "status", "priority", "created_at"},
     "access_reviews": {"id", "compliance_record_id", "reviewer_employee_id", "reviewed_employee_id", "decision"},
     "training_modules": {"id", "organization_id", "title", "category"},
     "training_assignments": {"id", "compliance_record_id", "employee_id", "training_module_id", "completion_status"},

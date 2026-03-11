@@ -53,6 +53,7 @@ jest.mock("./useCompliancePageContext", () => ({
           category: "privacy tests",
           suite_name: "PII validation suite",
           status: "failed",
+          quality_label: "Regressed",
           pass_rate: 50,
           total_runs: 2,
           failed_runs: 1,
@@ -69,6 +70,7 @@ jest.mock("./useCompliancePageContext", () => ({
           category: "privacy tests",
           suite_name: "PII validation suite",
           status: "passed",
+          quality_label: "Stable",
           pass_rate: 100,
           total_runs: 2,
           failed_runs: 0,
@@ -85,6 +87,7 @@ jest.mock("./useCompliancePageContext", () => ({
           category: "privacy tests",
           suite_name: "PII validation suite",
           status: "not_run",
+          quality_label: "Not Run",
           pass_rate: 0,
           total_runs: 0,
           failed_runs: 0,
@@ -104,6 +107,7 @@ jest.mock("./useCompliancePageContext", () => ({
       category: "privacy tests",
       suite_name: "PII validation suite",
       status: "failed",
+      quality_label: "Regressed",
       pass_rate: 50,
       flake_rate: 1,
       latest_environment: "synthetic_history",
@@ -118,6 +122,16 @@ jest.mock("./useCompliancePageContext", () => ({
       latest_execution: {
         output: "classification mismatch",
         error_message: "Detector missed expected email classification.",
+      },
+      task: {
+        id: 17,
+        status: "open",
+        priority: "medium",
+        assignee_employee_id: null,
+        assignee: null,
+        title: "Investigate failing test: test_detect_email",
+        created_at: "2026-03-11T12:05:00+00:00",
+        updated_at: "2026-03-11T12:05:00+00:00",
       },
       history: [
         {
@@ -136,6 +150,15 @@ jest.mock("./useCompliancePageContext", () => ({
     },
     loadTestCategory: mockLoadTestCategory,
     loadTestCase: mockLoadTestCase,
+    createOrAssignTestTask: jest.fn(),
+    updateTestTask: jest.fn(),
+    data: {
+      directory: {
+        employees: [
+          { id: 1, first_name: "Bo", last_name: "Harris", status: "active" },
+        ],
+      },
+    },
   }),
 }));
 
@@ -151,8 +174,7 @@ test("renders individual tests from the same file separately and shows node meta
   expect(screen.getByText("test_detect_phone")).toBeInTheDocument();
   expect(screen.getByText("test_detect_ssn")).toBeInTheDocument();
   expect(screen.getAllByText("tests/privacy_tests.py").length).toBeGreaterThan(0);
-  expect(screen.getByText("Pytest Node ID")).toBeInTheDocument();
-  expect(screen.getByText("tests/privacy_tests.py::test_detect_email")).toBeInTheDocument();
+  expect(screen.queryByText("Pytest Node ID")).not.toBeInTheDocument();
 
   await waitFor(() => {
     expect(mockLoadTestCategory).toHaveBeenCalled();
@@ -179,4 +201,24 @@ test("supports selecting a single test case and filtering by search and file pat
       }),
     );
   });
+});
+
+test("opens a run history drawer for the selected test and supports closing it", async () => {
+  const user = userEvent.setup();
+  render(<ComplianceTestingPage />);
+
+  await user.click(screen.getByText("test_detect_email"));
+
+  expect(screen.getByRole("dialog", { name: "test_detect_email" })).toBeInTheDocument();
+  expect(screen.getByText("Run History Inspector")).toBeInTheDocument();
+  expect(screen.getByText("Pytest Node ID")).toBeInTheDocument();
+  expect(screen.getByText("tests/privacy_tests.py::test_detect_email")).toBeInTheDocument();
+  expect(screen.getByText("Detector missed expected email classification.")).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Close" }));
+
+  await waitFor(() => {
+    expect(screen.queryByRole("dialog", { name: "test_detect_email" })).not.toBeInTheDocument();
+  });
+  expect(screen.queryByText("Selected Test")).not.toBeInTheDocument();
 });
