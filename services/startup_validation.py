@@ -25,6 +25,7 @@ from database.models.hr_control import HRControl
 from database.models.access_review import AccessReview
 from database.models.risk_register_item import RiskRegisterItem
 from database.models.scan_quota_counter import ScanQuotaCounter
+from database.models.security_state import SecurityState
 from database.models.security_incident import SecurityIncident
 from database.models.training_assignment import TrainingAssignment
 from database.models.training_module import TrainingModule
@@ -51,6 +52,7 @@ REQUIRED_SCHEMA = {
     "company_settings": {"id", "company_id", "default_policy_label", "allowed_upload_types"},
     "audit_events": {"id", "company_id", "user_id", "event_type", "description", "created_at"},
     "audit_logs": {"id", "user_id", "organization_id", "event_type", "event_category", "created_at"},
+    "security_states": {"id", "namespace", "state_key", "counter_value", "expires_at"},
     "scan_quota_counters": {"id", "user_id", "day", "count"},
     "security_incidents": {"id", "severity", "status", "description", "detected_at"},
     "employees": {"id", "employee_id", "email", "role", "company_id", "user_id"},
@@ -192,6 +194,7 @@ def _bootstrap_feature_tables() -> None:
             CompanySettings.__table__,
             AuditEvent.__table__,
             AuditLog.__table__,
+            SecurityState.__table__,
             ScanQuotaCounter.__table__,
             SecurityIncident.__table__,
             RefreshSession.__table__,
@@ -215,7 +218,7 @@ def _bootstrap_feature_tables() -> None:
         ],
     )
     logger.info(
-        "Startup validation: feature tables ensured (company_settings, audit_events, audit_logs, scan_quota_counters, security_incidents, refresh_sessions)."
+        "Startup validation: feature tables ensured (company_settings, audit_events, audit_logs, security_states, scan_quota_counters, security_incidents, refresh_sessions)."
     )
 
 

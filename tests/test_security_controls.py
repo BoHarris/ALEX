@@ -12,6 +12,7 @@ from database.models.audit_log import AuditLog
 from database.models.company import Company
 from database.models.company_settings import CompanySettings
 from database.models.scan_results import ScanResult
+from database.models.security_state import SecurityState
 from database.models.security_incident import SecurityIncident
 from database.models.user import User
 from dependencies.tier_guard import require_company_admin, require_security_admin
@@ -19,6 +20,7 @@ from routers import redacted_router
 from services.audit_service import record_audit_event
 from services.retention_service import apply_retention_state
 from services.security_service import extract_request_security_context, register_failed_login
+from services.security_state_store import SecurityStateStoreError, get_counter, increment_counter
 
 
 def _session():
@@ -31,6 +33,7 @@ def _session():
             AuditEvent.__table__,
             AuditLog.__table__,
             CompanySettings.__table__,
+            SecurityState.__table__,
             ScanResult.__table__,
             SecurityIncident.__table__,
         ],
@@ -230,3 +233,68 @@ def test_request_security_context_uses_trusted_forwarded_headers(monkeypatch):
 
     assert context.ip_address == "203.0.113.10"
     assert context.trusted_proxy is True
+
+
+def test_security_counter_persists_across_sessions():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine, tables=[SecurityState.__table__])
+    session_factory = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+
+    session_one = session_factory()
+    count_one = increment_counter(
+        session_one,
+        namespace="security:test",
+        state_key="shared-key",
+        window_seconds=120,
+    )
+    session_one.commit()
+    session_one.close()
+
+    session_two = session_factory()
+    count_two = get_counter(
+        session_two,
+        namespace="security:test",
+        state_key="shared-key",
+    )
+    session_two.close()
+
+    assert count_one == 1
+    assert count_two == 1
+
+
+def test_security_counter_expired_state_resets():
+    session = _session()
+    count = increment_counter(
+        session,
+        namespace="security:test",
+        state_key="expiring-key",
+        window_seconds=0,
+    )
+    session.commit()
+
+    current = get_counter(
+        session,
+        namespace="security:test",
+        state_key="expiring-key",
+    )
+
+    assert count == 1
+    assert current == 0
+
+
+def test_register_failed_login_raises_when_shared_store_unavailable(monkeypatch):
+    session = _session()
+
+    def _raise(*args, **kwargs):
+        raise SecurityStateStoreError()
+
+    monkeypatch.setattr("services.security_service.increment_counter", _raise)
+
+    with pytest.raises(SecurityStateStoreError):
+        register_failed_login(
+            session,
+            email="ada@example.com",
+            organization_id=1,
+            user_id=1,
+            context=SimpleNamespace(ip_address="127.0.0.1", device_fingerprint="pytest", request_id="r1"),
+        )

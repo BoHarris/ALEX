@@ -5,6 +5,7 @@ from .webauthn_challenge import WebAuthnChallenge
 from .company_settings import CompanySettings
 from .audit_event import AuditEvent
 from .audit_log import AuditLog
+from .security_state import SecurityState
 from .scan_quota_counter import ScanQuotaCounter
 from .security_incident import SecurityIncident
 from .refresh_session import RefreshSession

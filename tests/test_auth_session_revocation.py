@@ -10,6 +10,7 @@ from database.models.audit_event import AuditEvent
 from database.models.audit_log import AuditLog
 from database.models.company import Company
 from database.models.refresh_session import RefreshSession
+from database.models.security_state import SecurityState
 from database.models.security_incident import SecurityIncident
 from database.models.user import User
 from dependencies.tier_guard import get_current_user_context
@@ -30,6 +31,7 @@ def _session():
             AuditEvent.__table__,
             AuditLog.__table__,
             RefreshSession.__table__,
+            SecurityState.__table__,
             SecurityIncident.__table__,
         ],
     )

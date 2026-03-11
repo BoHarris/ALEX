@@ -3,8 +3,6 @@ import secrets
 import dataclasses
 from datetime import timedelta, datetime, timezone
 from enum import Enum
-from threading import Lock
-from time import time
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
@@ -18,7 +16,7 @@ from database.models.webauthn_challenge import WebAuthnChallenge
 from services.audit_service import record_audit_event
 from services.compliance_service import ensure_default_company_and_employee
 from services.refresh_session_service import issue_bound_refresh_token
-from services.security_service import extract_request_security_context, register_failed_login
+from services.security_service import enforce_auth_rate_limit, extract_request_security_context, register_failed_login
 from utils.auth_utils import create_access_token, ensure_user_is_active
 from utils.api_errors import error_payload
 from utils.rbac import ROLE_ORG_ADMIN, ROLE_USER, normalize_role
@@ -50,9 +48,6 @@ IS_PROD = os.getenv("ENV", "development").lower() == "production"
 AUTH_RATE_WINDOW_SECONDS = int(os.getenv("AUTH_RATE_WINDOW_SECONDS", "60"))
 AUTH_RATE_LIMIT_PER_IP = int(os.getenv("AUTH_RATE_LIMIT_PER_IP", "30"))
 AUTH_RATE_LIMIT_PER_IDENTIFIER = int(os.getenv("AUTH_RATE_LIMIT_PER_IDENTIFIER", "10"))
-
-_auth_rate_lock = Lock()
-_auth_rate_windows: dict[str, list[float]] = {}
 
 
 
@@ -89,32 +84,18 @@ class EmployeeWebAuthnRegisterVerifyRequest(BaseModel):
 
 def _enforce_auth_rate_limit(
     *,
+    db: Session,
     request: Request,
     identifier: str | None = None,
 ) -> None:
-    # TODO: move to shared persistent/distributed limiter for multi-instance deployments.
-    now = time()
-    window_start = now - AUTH_RATE_WINDOW_SECONDS
-    client_ip = request.client.host if request.client and request.client.host else "unknown"
-    keys = [f"ip:{client_ip}"]
-    if identifier:
-        keys.append(f"id:{identifier.strip().lower()}")
-
-    with _auth_rate_lock:
-        for key in keys:
-            history = _auth_rate_windows.get(key, [])
-            history = [ts for ts in history if ts >= window_start]
-            limit = AUTH_RATE_LIMIT_PER_IP if key.startswith("ip:") else AUTH_RATE_LIMIT_PER_IDENTIFIER
-            if len(history) >= limit:
-                raise HTTPException(
-                    status_code=429,
-                    detail=error_payload(
-                        detail="Rate limit exceeded",
-                        error_code="rate_limit_exceeded",
-                    ),
-                )
-            history.append(now)
-            _auth_rate_windows[key] = history
+    enforce_auth_rate_limit(
+        db,
+        request=request,
+        identifier=identifier,
+        per_ip_limit=AUTH_RATE_LIMIT_PER_IP,
+        per_identifier_limit=AUTH_RATE_LIMIT_PER_IDENTIFIER,
+        window_seconds=AUTH_RATE_WINDOW_SECONDS,
+    )
 
 
 def _new_user_handle() -> str:
@@ -327,7 +308,7 @@ def webauthn_register_options(
     payload: WebAuthnRegisterOptionsRequest = Body(...),
     db: Session = Depends(get_db),
 ):
-    _enforce_auth_rate_limit(request=request, identifier=payload.email)
+    _enforce_auth_rate_limit(db=db, request=request, identifier=payload.email)
     safe_email = _clean_required(payload.email, "email").lower()
     safe_first_name = _clean_required(payload.first_name, "first_name")
     safe_last_name = _clean_required(payload.last_name, "last_name")
@@ -442,7 +423,7 @@ def employee_webauthn_register_options(
     db: Session = Depends(get_db),
 ):
     ensure_default_company_and_employee(db)
-    _enforce_auth_rate_limit(request=request, identifier=payload.email)
+    _enforce_auth_rate_limit(db=db, request=request, identifier=payload.email)
     safe_email = _clean_required(payload.email, "email").lower()
     employee = _load_employee_by_email(db, safe_email)
     user = db.query(User).filter(User.id == employee.user_id).first() if employee.user_id else db.query(User).filter(User.email == safe_email).first()
@@ -557,7 +538,7 @@ def webauthn_register_verify(
     payload: WebAuthnRegisterVerifyRequest,
     db: Session = Depends(get_db),
 ):
-    _enforce_auth_rate_limit(request=request, identifier=str(payload.user_id))
+    _enforce_auth_rate_limit(db=db, request=request, identifier=str(payload.user_id))
     request_user_id = payload.user_id
     request_credential = payload.credential
 
@@ -648,7 +629,7 @@ def webauthn_login_options(
     payload: WebAuthnLoginOptionsRequest,
     db: Session = Depends(get_db),
 ):
-    _enforce_auth_rate_limit(request=request, identifier=payload.email)
+    _enforce_auth_rate_limit(db=db, request=request, identifier=payload.email)
     request_email = payload.email or ""
     safe_email = request_email.strip().lower()
     if not safe_email:
@@ -724,7 +705,7 @@ def webauthn_login_verify(
     payload: WebAuthnLoginVerifyRequest,
     db: Session = Depends(get_db),
 ):
-    _enforce_auth_rate_limit(request=request, identifier=payload.email)
+    _enforce_auth_rate_limit(db=db, request=request, identifier=payload.email)
     request_email = payload.email or ""
     request_credential = payload.credential
     safe_email = request_email.strip().lower()
@@ -875,7 +856,7 @@ def employee_webauthn_login_options(
     db: Session = Depends(get_db),
 ):
     ensure_default_company_and_employee(db)
-    _enforce_auth_rate_limit(request=request, identifier=payload.email)
+    _enforce_auth_rate_limit(db=db, request=request, identifier=payload.email)
     safe_email = _clean_required(payload.email, "email").lower()
     employee = _load_employee_by_email(db, safe_email)
     user = db.query(User).filter(User.id == employee.user_id).first() if employee.user_id else None
@@ -902,7 +883,7 @@ def employee_webauthn_login_verify(
     payload: WebAuthnLoginVerifyRequest,
     db: Session = Depends(get_db),
 ):
-    _enforce_auth_rate_limit(request=request, identifier=payload.email)
+    _enforce_auth_rate_limit(db=db, request=request, identifier=payload.email)
     safe_email = _clean_required(payload.email, "email").lower()
     employee = _load_employee_by_email(db, safe_email)
     user = db.query(User).filter(User.id == employee.user_id).first() if employee.user_id else None
