@@ -41,6 +41,7 @@ SCAN_CHUNK_ROWS = max(100, int(os.getenv("SCAN_CHUNK_ROWS", "1000")))
 MAX_SCAN_ROWS = max(1, int(os.getenv("MAX_SCAN_ROWS", "50000")))
 MAX_SCAN_CELLS = max(1, int(os.getenv("MAX_SCAN_CELLS", "500000")))
 MAX_SCAN_COLUMNS = max(1, int(os.getenv("MAX_SCAN_COLUMNS", "200")))
+XML_TAG_INVALID_CHARS_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
 
 @dataclass(frozen=True)
@@ -297,7 +298,50 @@ def _build_feature_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]
     return _build_feature_dataframe_from_samples(features, value_samples), features
 
 
-def _write_redacted_file(redacted_df: pd.DataFrame, redacted_path: str, ext: str) -> None:
+def sanitize_xml_tag(column_name: str) -> str:
+    sanitized = re.sub(r"\s+", "_", str(column_name).strip())
+    sanitized = XML_TAG_INVALID_CHARS_RE.sub("_", sanitized)
+    sanitized = re.sub(r"_+", "_", sanitized).strip("_")
+    if not sanitized:
+        sanitized = "field"
+    if not re.match(r"[A-Za-z_]", sanitized[0]):
+        sanitized = f"field_{sanitized}"
+    return sanitized
+
+
+def _write_redacted_json_output(*, redacted_df: pd.DataFrame, redacted_path: str, scan_id: int | None) -> None:
+    with open(redacted_path, "w", encoding="utf-8") as handle:
+        handle.write('{"scan_id": ')
+        json.dump(scan_id, handle)
+        handle.write(', "results": [')
+        first_record = True
+        for row in redacted_df.to_dict(orient="records"):
+            if not first_record:
+                handle.write(", ")
+            json.dump(row, handle, ensure_ascii=False)
+            first_record = False
+        handle.write("]}")
+
+
+def _write_redacted_xml_output(*, redacted_df: pd.DataFrame, redacted_path: str) -> None:
+    root = ET.Element("results")
+    for _, row in redacted_df.iterrows():
+        item = ET.SubElement(root, "item")
+        for col_name, value in row.items():
+            sanitized_tag = sanitize_xml_tag(col_name)
+            child = ET.SubElement(item, sanitized_tag)
+            child.set("original", str(col_name))
+            child.text = "" if value is None else str(value)
+    ET.ElementTree(root).write(redacted_path, encoding="utf-8", xml_declaration=True)
+
+
+def _write_redacted_file(
+    redacted_df: pd.DataFrame,
+    redacted_path: str,
+    ext: str,
+    *,
+    scan_id: int | None = None,
+) -> None:
     if ext == ".csv":
         redacted_df.to_csv(redacted_path, index=False)
     elif ext == ".tsv":
@@ -307,15 +351,9 @@ def _write_redacted_file(redacted_df: pd.DataFrame, redacted_path: str, ext: str
     elif ext in {".xlsx", ".xls"}:
         redacted_df.to_excel(redacted_path, index=False)
     elif ext == ".json":
-        redacted_df.to_json(redacted_path, orient="records", lines=True)
+        _write_redacted_json_output(redacted_df=redacted_df, redacted_path=redacted_path, scan_id=scan_id)
     elif ext == ".xml":
-        root = ET.Element("root")
-        for _, row in redacted_df.iterrows():
-            item = ET.SubElement(root, "item")
-            for col_name, value in row.items():
-                child = ET.SubElement(item, col_name)
-                child.text = "" if value is None else str(value)
-        ET.ElementTree(root).write(redacted_path)
+        _write_redacted_xml_output(redacted_df=redacted_df, redacted_path=redacted_path)
     elif ext == ".docx":
         out = Document()
         if list(redacted_df.columns) == ["text"]:
@@ -651,7 +689,6 @@ def run_scan_pipeline(
             pii_columns,
             aggressive,
         )
-        _write_redacted_file(redacted_df=redacted_df, redacted_path=redacted_path, ext=ext)
 
     risk_score = min(round((total_redacted / total_values) * 100), 100) if total_values > 0 else 0
 
@@ -665,6 +702,9 @@ def run_scan_pipeline(
         redacted_type_counts=redacted_type_counts,
         public_redacted_path=redacted_path,
     )
+
+    if not (source_path and ext in {".csv", ".tsv", ".txt", ".log"}):
+        _write_redacted_file(redacted_df=redacted_df, redacted_path=redacted_path, ext=ext, scan_id=scan_id)
 
     logger.info(
         "Completed scan id=%s user_id=%s file=%s redacted_total=%s",
