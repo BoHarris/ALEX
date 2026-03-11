@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 import uuid
 import zipfile
 from functools import partial
@@ -21,9 +22,9 @@ from database.models.company_settings import CompanySettings
 from database.models.scan_results import ScanResult
 from dependencies.tier_guard import get_current_user_context
 from services.audit_report_service import generate_audit_report_html, render_report_pdf_from_html
-from services.audit_service import record_audit_event
+from services.audit_service import list_audit_events, record_audit_event, serialize_audit_event
 from services.retention_service import apply_retention_state, apply_retention_state_bulk
-from services.scan_service import ScanContext, ScanLimitError, run_scan_pipeline
+from services.scan_service import ScanContext, ScanLimitError, parse_scan_result_metadata, run_scan_pipeline
 from services.security_service import extract_request_security_context, register_scan_activity
 from utils.api_errors import error_payload
 from utils.constants import SUPPORTED_EXTENSIONS, SUPPORTED_EXTENSIONS_SORTED
@@ -48,6 +49,7 @@ class ScanResultPayload(BaseModel):
     redacted_count: int
     total_values: int
     redaction_summary: dict[str, int]
+    detection_results: list[dict[str, object]]
 
 
 def _is_text_payload(file_bytes: bytes) -> bool:
@@ -159,25 +161,13 @@ def _company_allowed_extensions(db: Session, company_id: int | None) -> set[str]
 
 
 def _parse_redacted_type_counts(raw_value: str | None) -> dict[str, int]:
-    if not raw_value:
-        return {}
-    try:
-        data = json.loads(raw_value)
-    except (TypeError, json.JSONDecodeError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
+    counts, _ = parse_scan_result_metadata(raw_value)
+    return counts
 
-    normalized: dict[str, int] = {}
-    for key, value in data.items():
-        label = str(key).strip()
-        if not label:
-            continue
-        try:
-            normalized[label] = int(value)
-        except (TypeError, ValueError):
-            continue
-    return normalized
+
+def _parse_detection_results(raw_value: str | None) -> list[dict[str, object]]:
+    _, detections = parse_scan_result_metadata(raw_value)
+    return detections
 
 
 def _serialize_scan(scan: ScanResult, *, include_submitter: bool) -> dict:
@@ -189,6 +179,7 @@ def _serialize_scan(scan: ScanResult, *, include_submitter: bool) -> dict:
         "total_pii_found": scan.total_pii_found,
         "redacted_count": scan.total_pii_found,
         "redacted_type_counts": _parse_redacted_type_counts(scan.redacted_type_counts),
+        "detection_results": _parse_detection_results(scan.redacted_type_counts),
         "pii_types_found": [item.strip() for item in (scan.pii_types_found or "").split(",") if item.strip()],
         "status": scan.status if scan.status else ("ready" if scan.redacted_file_path else "failed"),
         "is_archived": scan.status in {"archived", "expired"},
@@ -207,6 +198,20 @@ def _serialize_scan(scan: ScanResult, *, include_submitter: bool) -> dict:
             else None
         ),
     }
+
+
+def _scan_event_metadata(*, scan_id: int | None, filename: str | None, file_type: str | None, **extra: object) -> dict[str, object]:
+    metadata: dict[str, object] = {}
+    if scan_id is not None:
+        metadata["scan_id"] = scan_id
+    if filename:
+        metadata["filename"] = filename
+    if file_type:
+        metadata["file_type"] = file_type
+    for key, value in extra.items():
+        if value is not None:
+            metadata[key] = value
+    return metadata
 
 
 def _build_scan_query(db: Session, current_user: dict):
@@ -331,6 +336,7 @@ async def create_scan(
     reserved_quota = False
     temp_path = None
     request_context = extract_request_security_context(request)
+    started_at = time.perf_counter()
     try:
         temp_path, _, file_signature_sample = await _stream_upload_to_tempfile(
             file,
@@ -357,7 +363,7 @@ async def create_scan(
             target_type="scan",
             target_id=None,
             request_context=request_context,
-            event_metadata={"filename": file.filename, "file_type": ext.lstrip(".")},
+            event_metadata=_scan_event_metadata(scan_id=None, filename=file.filename, file_type=ext.lstrip(".")),
         )
         register_scan_activity(
             db,
@@ -411,7 +417,14 @@ async def create_scan(
             target_type="scan",
             target_id=str(result.scan_id),
             request_context=request_context,
-            event_metadata={"risk_score": result.risk_score, "redacted_count": result.redacted_count},
+            event_metadata=_scan_event_metadata(
+                scan_id=result.scan_id,
+                filename=result.filename,
+                file_type=ext.lstrip("."),
+                risk_score=result.risk_score,
+                redacted_count=result.redacted_count,
+                scan_duration_ms=round((time.perf_counter() - started_at) * 1000, 2),
+            ),
         )
         db.commit()
         return ScanResultPayload(
@@ -423,6 +436,7 @@ async def create_scan(
             redacted_count=result.redacted_count,
             total_values=result.total_values,
             redaction_summary=result.redacted_type_counts,
+            detection_results=result.detection_results,
         )
     except ScanLimitError as exc:
         if reserved_quota:
@@ -437,7 +451,14 @@ async def create_scan(
             target_type="user",
             target_id=str(user_id),
             request_context=request_context,
-            event_metadata={"reason": exc.detail, "error_code": exc.error_code},
+            event_metadata=_scan_event_metadata(
+                scan_id=None,
+                filename=file.filename,
+                file_type=ext.lstrip("."),
+                reason=exc.detail,
+                error_code=exc.error_code,
+                scan_duration_ms=round((time.perf_counter() - started_at) * 1000, 2),
+            ),
         )
         db.commit()
         raise HTTPException(
@@ -457,7 +478,13 @@ async def create_scan(
             target_type="user",
             target_id=str(user_id),
             request_context=request_context,
-            event_metadata={"reason": str(exc)},
+            event_metadata=_scan_event_metadata(
+                scan_id=None,
+                filename=file.filename,
+                file_type=ext.lstrip("."),
+                reason=str(exc),
+                scan_duration_ms=round((time.perf_counter() - started_at) * 1000, 2),
+            ),
         )
         db.commit()
         raise HTTPException(
@@ -479,7 +506,13 @@ async def create_scan(
             target_type="user",
             target_id=str(user_id),
             request_context=request_context,
-            event_metadata={"error_id": error_id},
+            event_metadata=_scan_event_metadata(
+                scan_id=None,
+                filename=file.filename,
+                file_type=ext.lstrip("."),
+                error_id=error_id,
+                scan_duration_ms=round((time.perf_counter() - started_at) * 1000, 2),
+            ),
         )
         db.commit()
         raise HTTPException(
@@ -509,7 +542,13 @@ async def create_scan(
             target_type="user",
             target_id=str(user_id),
             request_context=request_context,
-            event_metadata={"error_id": error_id},
+            event_metadata=_scan_event_metadata(
+                scan_id=None,
+                filename=file.filename,
+                file_type=ext.lstrip("."),
+                error_id=error_id,
+                scan_duration_ms=round((time.perf_counter() - started_at) * 1000, 2),
+            ),
         )
         db.commit()
         raise HTTPException(
@@ -561,6 +600,18 @@ def get_scan(
     apply_retention_state(db, scan)
     include_submitter = has_any_role(current_user["role"], ROLE_ORG_ADMIN, ROLE_SECURITY_ADMIN) and current_user["company_id"] is not None
     return _serialize_scan(scan, include_submitter=include_submitter)
+
+
+@router.get("/{scan_id}/lineage")
+def get_scan_lineage(
+    scan_id: int,
+    current_user: dict = Depends(get_current_user_context),
+    db: Session = Depends(get_db),
+):
+    scan = _get_scan_or_404(db, scan_id)
+    _authorize_scan_access(scan, current_user)
+    events = list_audit_events(db, company_id=scan.company_id, scan_id=scan.id, limit=200)
+    return {"scan_id": scan.id, "events": [serialize_audit_event(event) for event in reversed(events)]}
 
 
 @router.post("/{scan_id}/archive")
@@ -668,6 +719,7 @@ def download_redacted_file(
         target_type="scan",
         target_id=str(scan.id),
         request_context=extract_request_security_context(request),
+        event_metadata=_scan_event_metadata(scan_id=scan.id, filename=scan.filename, file_type=scan.file_type),
     )
     db.commit()
     return FileResponse(str(path), media_type=mime or "application/octet-stream", filename=path.name)
@@ -709,6 +761,12 @@ def download_scan_report(
         target_type="scan",
         target_id=str(scan.id),
         request_context=extract_request_security_context(request),
+        event_metadata=_scan_event_metadata(
+            scan_id=scan.id,
+            filename=scan.filename,
+            file_type=scan.file_type,
+            report_format="html",
+        ),
     )
     db.commit()
     return HTMLResponse(
@@ -768,6 +826,12 @@ def download_scan_report_pdf(
         target_type="scan",
         target_id=str(scan.id),
         request_context=extract_request_security_context(request),
+        event_metadata=_scan_event_metadata(
+            scan_id=scan.id,
+            filename=scan.filename,
+            file_type=scan.file_type,
+            report_format="pdf",
+        ),
     )
     db.commit()
     return Response(

@@ -80,7 +80,7 @@ def test_schema_revision_validation_passes_when_revision_matches(monkeypatch):
         conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(255) NOT NULL)"))
         conn.execute(
             text("INSERT INTO alembic_version (version_num) VALUES (:revision)"),
-            {"revision": "20260311_0001_initial_schema"},
+            {"revision": startup_validation._required_schema_revision()},
         )
 
     monkeypatch.setattr(startup_validation, "engine", engine)
@@ -127,9 +127,10 @@ def test_predict_pii_columns_uses_initialized_model():
                 "notes": ["safe", "safe"],
             }
         )
-        pii_columns = scan_service._predict_pii_columns(frame)
+        pii_columns, detection_results = scan_service._predict_pii_columns(frame)
     finally:
         scan_service.set_scan_model(previous_model)
 
     assert pii_columns == ["email"]
+    assert detection_results[0]["detected_type"] == "PII_EMAIL"
     assert model.calls == 1

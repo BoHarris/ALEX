@@ -310,30 +310,39 @@ def ensure_test_runs(db: Session, organization_id: int) -> None:
     tests_dir = Path("tests")
     test_files = list(tests_dir.glob("test_*.py")) if tests_dir.exists() else []
     categories = [
-        ("API tests", "api"),
-        ("security tests", "security"),
-        ("privacy tests", "privacy"),
-        ("UI tests", "ui"),
-        ("integration tests", "integration"),
+        ("API tests", "api", "Automated API contract coverage", [
+            ("passed", "passed", "skipped"),
+            ("passed", "failed", "skipped"),
+            ("passed", "passed", "skipped"),
+        ]),
+        ("security tests", "security", "Authentication and security hardening checks", [
+            ("passed", "failed", "skipped"),
+            ("passed", "passed", "skipped"),
+            ("passed", "passed", "skipped"),
+        ]),
+        ("privacy tests", "privacy", "PII detection and redaction validation", [
+            ("failed", "passed", "skipped"),
+            ("passed", "passed", "skipped"),
+            ("passed", "failed", "skipped"),
+        ]),
+        ("UI tests", "ui", "Frontend workflow and regression checks", [
+            ("passed", "passed", "skipped"),
+            ("passed", "passed", "skipped"),
+            ("passed", "passed", "skipped"),
+        ]),
+        ("integration tests", "integration", "Cross-system environment validation", [
+            ("failed", "failed", "skipped"),
+            ("passed", "failed", "skipped"),
+            ("failed", "failed", "skipped"),
+        ]),
     ]
-    for display_name, key in categories:
+    for display_name, key, suite_suffix, status_windows in categories:
         matching = [path for path in test_files if key in path.name.lower()]
-        run = ComplianceTestRun(
-            organization_id=organization_id,
-            category=display_name,
-            suite_name=f"{display_name} baseline",
-            status="passing" if matching or key != "integration" else "failing",
-            coverage_percent=Decimal("80.00") if matching else Decimal("60.00"),
-            report_link=f"/tests/{key}",
-        )
-        db.add(run)
-        db.flush()
         seed_cases = [
             (
                 f"{display_name} smoke test",
                 f"tests/test_{key}_smoke.py",
                 f"Validates the primary {display_name.lower()} path.",
-                "passed",
                 120,
                 "All assertions passed.",
                 None,
@@ -342,34 +351,59 @@ def ensure_test_runs(db: Session, organization_id: int) -> None:
                 f"{display_name} regression guard",
                 f"tests/test_{key}_regression.py",
                 f"Protects the key {display_name.lower()} regressions.",
-                "failed" if key == "integration" else "passed",
                 240,
                 "Regression suite executed.",
-                "Expected status 200 but received 500." if key == "integration" else None,
+                "Expected status 200 but received 500.",
             ),
             (
                 f"{display_name} optional scenario",
                 f"tests/test_{key}_optional.py",
                 f"Covers optional {display_name.lower()} behavior.",
-                "skipped",
                 0,
                 "Skipped pending environment prerequisites.",
                 None,
             ),
         ]
-        for name, file_name, description, status, duration_ms, output, error_message in seed_cases:
-            db.add(
-                ComplianceTestCaseResult(
-                    test_run_id=run.id,
-                    name=name,
-                    file_name=file_name,
-                    description=description,
-                    status=status,
-                    duration_ms=duration_ms,
-                    output=output,
-                    error_message=error_message,
-                )
+        for history_index, statuses in enumerate(status_windows):
+            passed_tests = sum(1 for status in statuses if status == "passed")
+            failed_tests = sum(1 for status in statuses if status == "failed")
+            skipped_tests = sum(1 for status in statuses if status == "skipped")
+            total_tests = len(statuses)
+            run = ComplianceTestRun(
+                organization_id=organization_id,
+                category=display_name,
+                suite_name=f"{display_name} - {suite_suffix}",
+                dataset_name="seed_baseline",
+                status="failed" if failed_tests else "passed" if passed_tests else "skipped",
+                total_tests=total_tests,
+                passed_tests=passed_tests,
+                failed_tests=failed_tests,
+                skipped_tests=skipped_tests,
+                accuracy_score=Decimal(str(round((passed_tests / max(passed_tests + failed_tests, 1)), 4))),
+                coverage_percent=Decimal("80.00") if matching else Decimal("60.00"),
+                report_link=f"/tests/{key}",
+                run_at=datetime.now(timezone.utc) - timedelta(days=(len(status_windows) - history_index - 1) * 7),
             )
+            db.add(run)
+            db.flush()
+            for (name, file_name, description, duration_ms, output, default_error), status in zip(seed_cases, statuses):
+                db.add(
+                    ComplianceTestCaseResult(
+                        test_run_id=run.id,
+                        name=name,
+                        dataset_name="seed_baseline",
+                        file_name=file_name,
+                        description=description,
+                        expected_result=None,
+                        actual_result=None,
+                        status=status,
+                        confidence_score=None,
+                        duration_ms=duration_ms,
+                        output=output,
+                        error_message=default_error if status == "failed" else None,
+                        last_run_at=run.run_at,
+                    )
+                )
     db.commit()
 
 

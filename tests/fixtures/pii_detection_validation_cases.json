@@ -1,0 +1,17 @@
+{
+  "pii_examples": {
+    "email": ["ada@example.com", "grace@example.org"],
+    "phone_number": ["555-123-4567", "(212) 555-0199"],
+    "ssn": ["123-45-6789", "987-65-4321"],
+    "address": ["123 Main Street, New York, NY 10001", "456 Oak Road, Phoenix, AZ 85001"],
+    "ip_address": ["192.168.1.10", "10.0.0.7"],
+    "name": ["John Smith", "Jane Doe"]
+  },
+  "non_pii_examples": {
+    "product_id": ["SKU-100", "SKU-200"],
+    "session_length": ["35", "42"],
+    "order_count": ["4", "8"],
+    "inventory_level": ["250", "310"],
+    "temperature": ["68.2", "71.0"]
+  }
+}

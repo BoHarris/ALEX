@@ -15,7 +15,7 @@ from database.models.company_settings import CompanySettings
 from database.models.scan_results import ScanResult
 from database.models.security_incident import SecurityIncident
 from dependencies.tier_guard import require_company_admin, require_security_admin
-from services.audit_service import record_audit_event
+from services.audit_service import list_audit_events as query_audit_events, record_audit_event, serialize_audit_event
 from services.retention_service import apply_retention_state_bulk
 from services.security_service import extract_request_security_context
 from utils.api_errors import error_payload
@@ -231,6 +231,11 @@ def get_admin_overview(
 @router.get("/audit-events")
 def list_audit_events(
     limit: int = Query(default=50, ge=1, le=200),
+    user_id: int | None = Query(default=None),
+    scan_id: int | None = Query(default=None),
+    event_type: str | None = Query(default=None),
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
     current_user: dict = Depends(require_company_admin),
     db: Session = Depends(get_db),
 ):
@@ -242,28 +247,18 @@ def list_audit_events(
         "Audit trail visibility is available on Pro and Business plans.",
     )
 
-    events = (
-        db.query(AuditLog)
-        .filter(AuditLog.organization_id == company_id)
-        .order_by(AuditLog.created_at.desc())
-        .limit(limit)
-        .all()
+    events = query_audit_events(
+        db,
+        company_id=company_id,
+        limit=limit,
+        user_id=user_id,
+        scan_id=scan_id,
+        event_type=event_type,
+        date_from=date_from,
+        date_to=date_to,
     )
     return {
-        "events": [
-            {
-                "event_id": event.id,
-                "event_type": event.event_type,
-                "event_category": event.event_category,
-                "description": event.event_metadata,
-                "user_id": event.user_id,
-                "target_type": event.resource_type,
-                "target_id": event.resource_id,
-                "ip_address": event.ip_address,
-                "created_at": event.created_at.isoformat() if event.created_at else None,
-            }
-            for event in events
-        ]
+        "events": [serialize_audit_event(event) for event in events]
     }
 
 

@@ -26,6 +26,7 @@ from database.models.user import User
 from database.models.vendor import Vendor
 from database.models.wiki_page import WikiPage
 from routers import compliance_router
+from services.test_management_service import encode_test_id
 
 
 def _session():
@@ -304,6 +305,243 @@ def test_test_category_and_case_detail_are_available_for_drill_down():
     assert detail["summary"]["failing"] == 1
     assert detail["tests"][0]["test_name"] == "test_invalid_token_rejected"
     assert case_detail["error_message"] == "Expected 401 but received 200."
+
+
+def test_test_result_tracking_records_individual_results_and_updates_run_summary():
+    session = _session()
+    _, _, employee = _seed_org(session)
+
+    run = compliance_router.create_test_run(
+        compliance_router.TestRunCreateRequest(
+            category="privacy tests",
+            suite_name="PII validation suite",
+            status="running",
+            dataset_name="synthetic_pii_validation",
+        ),
+        current_employee=_employee_context(employee),
+        db=session,
+    )
+
+    created = compliance_router.create_test_result(
+        run["id"],
+        compliance_router.TestResultCreateRequest(
+            test_name="detect_email",
+            dataset_name="synthetic_pii_validation",
+            expected_result="PII_EMAIL",
+            actual_result="PII_EMAIL",
+            status="passed",
+            confidence_score=0.83,
+            duration_ms=14,
+            output="matched taxonomy",
+        ),
+        current_employee=_employee_context(employee),
+        db=session,
+    )
+    failed = compliance_router.create_test_result(
+        run["id"],
+        compliance_router.TestResultCreateRequest(
+            test_name="non_pii_product_id",
+            dataset_name="synthetic_pii_validation",
+            expected_result="NON_PII",
+            actual_result="PII_EMAIL",
+            status="failed",
+            confidence_score=0.41,
+            duration_ms=9,
+            error_message="false positive",
+        ),
+        current_employee=_employee_context(employee),
+        db=session,
+    )
+
+    runs = compliance_router.list_test_runs(
+        limit=10,
+        dataset_name="synthetic_pii_validation",
+        suite_name=None,
+        current_employee=_employee_context(employee),
+        db=session,
+    )
+
+    assert created["expected_result"] == "PII_EMAIL"
+    assert created["actual_result"] == "PII_EMAIL"
+    assert created["confidence_score"] == 0.83
+    assert failed["status"] == "failed"
+    assert runs["runs"][0]["total_tests"] == 2
+    assert runs["runs"][0]["passed_tests"] == 1
+    assert runs["runs"][0]["failed_tests"] == 1
+    assert runs["runs"][0]["accuracy_score"] == 0.5
+
+
+def test_test_metrics_and_results_endpoints_return_quality_data():
+    session = _session()
+    _, _, employee = _seed_org(session)
+
+    run = compliance_router.create_test_run(
+        compliance_router.TestRunCreateRequest(
+            category="privacy tests",
+            suite_name="PII validation suite",
+            status="running",
+            dataset_name="synthetic_metrics",
+        ),
+        current_employee=_employee_context(employee),
+        db=session,
+    )
+
+    payloads = [
+        compliance_router.TestResultCreateRequest(
+            test_name="detect_email",
+            dataset_name="synthetic_metrics",
+            expected_result="PII_EMAIL",
+            actual_result="PII_EMAIL",
+            status="passed",
+            confidence_score=0.88,
+            duration_ms=10,
+        ),
+        compliance_router.TestResultCreateRequest(
+            test_name="non_pii_product_id",
+            dataset_name="synthetic_metrics",
+            expected_result="NON_PII",
+            actual_result="PII_EMAIL",
+            status="failed",
+            confidence_score=0.31,
+            duration_ms=8,
+        ),
+        compliance_router.TestResultCreateRequest(
+            test_name="detect_phone",
+            dataset_name="synthetic_metrics",
+            expected_result="PII_PHONE",
+            actual_result="NON_PII",
+            status="failed",
+            confidence_score=0.12,
+            duration_ms=7,
+        ),
+    ]
+    for payload in payloads:
+        compliance_router.create_test_result(
+            run["id"],
+            payload,
+            current_employee=_employee_context(employee),
+            db=session,
+        )
+
+    results = compliance_router.list_test_results(
+        limit=10,
+        dataset_name="synthetic_metrics",
+        test_name=None,
+        status=None,
+        current_employee=_employee_context(employee),
+        db=session,
+    )
+    metrics = compliance_router.get_test_metrics(
+        dataset_name="synthetic_metrics",
+        current_employee=_employee_context(employee),
+        db=session,
+    )
+
+    assert len(results["results"]) == 3
+    assert results["results"][0]["dataset_name"] == "synthetic_metrics"
+    assert metrics["total_tests"] == 3
+    assert metrics["passed"] == 1
+    assert metrics["failed"] == 2
+    assert metrics["detection_accuracy"] == 0.3333
+    assert metrics["false_positive_rate"] == 0.3333
+    assert metrics["false_negative_rate"] == 0.3333
+
+
+def test_test_dashboard_inventory_and_history_support_management_views():
+    session = _session()
+    _, _, employee = _seed_org(session)
+
+    first_run = compliance_router.create_test_run(
+        compliance_router.TestRunCreateRequest(
+            category="privacy tests",
+            suite_name="PII validation suite",
+            status="running",
+            dataset_name="synthetic_history",
+        ),
+        current_employee=_employee_context(employee),
+        db=session,
+    )
+    second_run = compliance_router.create_test_run(
+        compliance_router.TestRunCreateRequest(
+            category="privacy tests",
+            suite_name="PII validation suite",
+            status="running",
+            dataset_name="synthetic_history",
+        ),
+        current_employee=_employee_context(employee),
+        db=session,
+    )
+
+    compliance_router.create_test_result(
+        first_run["id"],
+        compliance_router.TestResultCreateRequest(
+            test_name="detect_email",
+            dataset_name="synthetic_history",
+            expected_result="PII_EMAIL",
+            actual_result="PII_EMAIL",
+            status="passed",
+            confidence_score=0.88,
+            duration_ms=10,
+            description="Email detection should classify as PII_EMAIL.",
+        ),
+        current_employee=_employee_context(employee),
+        db=session,
+    )
+    compliance_router.create_test_result(
+        second_run["id"],
+        compliance_router.TestResultCreateRequest(
+            test_name="detect_email",
+            dataset_name="synthetic_history",
+            expected_result="PII_EMAIL",
+            actual_result="NON_PII",
+            status="failed",
+            confidence_score=0.19,
+            duration_ms=8,
+            error_message="Detector missed expected email classification.",
+            description="Email detection should classify as PII_EMAIL.",
+        ),
+        current_employee=_employee_context(employee),
+        db=session,
+    )
+    compliance_router.create_test_result(
+        second_run["id"],
+        compliance_router.TestResultCreateRequest(
+            test_name="detect_phone",
+            dataset_name="synthetic_history",
+            expected_result="PII_PHONE",
+            actual_result="PII_PHONE",
+            status="passed",
+            confidence_score=0.82,
+            duration_ms=7,
+            description="Phone detection should classify as PII_PHONE.",
+        ),
+        current_employee=_employee_context(employee),
+        db=session,
+    )
+
+    dashboard = compliance_router.get_test_dashboard(current_employee=_employee_context(employee), db=session)
+    inventory = compliance_router.list_managed_test_inventory(
+        category="privacy tests",
+        status="flaky",
+        search="email",
+        sort="flakiness",
+        current_employee=_employee_context(employee),
+        db=session,
+    )
+    test_id = encode_test_id(category="privacy tests", test_name="detect_email")
+    detail = compliance_router.get_test_case_detail(test_id, current_employee=_employee_context(employee), db=session)
+    history = compliance_router.get_test_case_history(test_id, current_employee=_employee_context(employee), db=session)
+
+    assert dashboard["summary"]["total_tests"] == 2
+    assert dashboard["summary"]["flaky_tests"] == 1
+    assert dashboard["categories"][0]["category"] == "privacy tests"
+    assert inventory["summary"]["flaky"] == 1
+    assert len(inventory["tests"]) == 1
+    assert inventory["tests"][0]["test_name"] == "detect_email"
+    assert detail["trend"] in {"unstable", "degrading"}
+    assert detail["total_runs"] == 2
+    assert len(history["history"]) == 2
+    assert history["history"][0]["status"] in {"failed", "passed"}
 
 
 def test_compliance_overview_returns_attention_data():

@@ -70,20 +70,13 @@ venv\Scripts\activate
 
 ### 2. Install backend dependencies
 
-This repository currently does not include a pinned root `requirements.txt` or `pyproject.toml`, so backend dependencies need to be installed into your local virtual environment based on the application stack.
+The backend now ships with a pinned root dependency manifest for reproducible installs:
 
-At minimum, the environment should include packages used by the codebase such as:
+```bash
+pip install -r requirements.txt
+```
 
-- `fastapi`
-- `uvicorn`
-- `sqlalchemy`
-- `alembic`
-- `python-dotenv`
-- `webauthn`
-- `reportlab` or `weasyprint`
-- the ML/data-processing dependencies needed by the scan pipeline
-
-If you are preparing this repository for broader external use, adding a pinned backend dependency manifest would be the next cleanup step.
+This manifest pins the FastAPI/auth stack, migration tooling, scan pipeline/ML dependencies, Presidio redaction dependencies, report-generation packages, and the libSQL smoke-test client used by the repository utilities.
 
 ### 3. Install frontend dependencies
 
@@ -172,7 +165,8 @@ This is intentional: startup should fail fast when the runtime is incomplete or 
 
 - `GET /health`
 - `GET /ready`
-- `POST /predict/`
+- `GET /scans/supported-file-types`
+- `POST /scans`
 - `GET /protected/me`
 - `GET /scans`
 - `GET /admin/overview`
@@ -211,6 +205,12 @@ Backend tests:
 
 ```bash
 python -m pytest tests
+```
+
+Backend dependency validation:
+
+```bash
+python -m pip check
 ```
 
 Database migrations:

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { authFetch } from "../utils/authFetch";
 import { getResponseMessage, readResponseData } from "../utils/http";
 
@@ -18,9 +18,10 @@ export function useComplianceWorkspace(enabled = true) {
   const [reloadKey, setReloadKey] = useState(0);
   const [testCategoryDetail, setTestCategoryDetail] = useState(null);
   const [selectedTestCase, setSelectedTestCase] = useState(null);
+  const [testDashboard, setTestDashboard] = useState(null);
   const [timelineCache, setTimelineCache] = useState({});
 
-  async function loadWorkspace() {
+  const loadWorkspace = useCallback(async () => {
     const [me, overview, directory, pages, vendors, incidents, risks, reviews, assignments, tests, modules, auditLog, codeReviews] = await Promise.all([
       requestComplianceJson("/compliance/me"),
       requestComplianceJson("/compliance/overview"),
@@ -37,7 +38,7 @@ export function useComplianceWorkspace(enabled = true) {
       requestComplianceJson("/compliance/code-reviews"),
     ]);
     return { me, overview, directory, pages, vendors, incidents, risks, reviews, assignments, tests, modules, auditLog, codeReviews };
-  }
+  }, []);
 
   useEffect(() => {
     if (!enabled) {
@@ -54,6 +55,7 @@ export function useComplianceWorkspace(enabled = true) {
         const nextData = await loadWorkspace();
         if (mounted) {
           setData(nextData);
+          setTestDashboard(nextData.tests || null);
         }
       } catch (err) {
         if (mounted) {
@@ -69,9 +71,9 @@ export function useComplianceWorkspace(enabled = true) {
     return () => {
       mounted = false;
     };
-  }, [enabled, reloadKey]);
+  }, [enabled, loadWorkspace, reloadKey]);
 
-  async function mutate(path, body, method = "POST") {
+  const mutate = useCallback(async (path, body, method = "POST") => {
     await requestComplianceJson(path, {
       method,
       headers: { "Content-Type": "application/json" },
@@ -80,34 +82,74 @@ export function useComplianceWorkspace(enabled = true) {
     const nextData = await loadWorkspace();
     setData(nextData);
     return nextData;
-  }
+  }, [loadWorkspace]);
 
-  async function loadTestCategory(categoryName) {
-    const detail = await requestComplianceJson(`/compliance/tests/categories/${encodeURIComponent(categoryName)}`);
+  const loadTestInventory = useCallback(async (filters = {}) => {
+    const params = new URLSearchParams();
+    Object.entries(filters).forEach(([key, value]) => {
+      if (value != null && value !== "") {
+        params.set(key, value);
+      }
+    });
+    const suffix = params.toString() ? `?${params.toString()}` : "";
+    return requestComplianceJson(`/compliance/tests/inventory${suffix}`);
+  }, []);
+
+  const loadTestCase = useCallback(async (caseId) => {
+    const [detail, history] = await Promise.all([
+      requestComplianceJson(`/compliance/tests/cases/${encodeURIComponent(caseId)}`),
+      requestComplianceJson(`/compliance/tests/cases/${encodeURIComponent(caseId)}/history`),
+    ]);
+    const nextDetail = { ...detail, history: history.history || [] };
+    setSelectedTestCase(nextDetail);
+    return nextDetail;
+  }, []);
+
+  const loadTestDashboard = useCallback(async () => {
+    const dashboard = await requestComplianceJson("/compliance/tests/dashboard");
+    setTestDashboard(dashboard);
+    return dashboard;
+  }, []);
+
+  const loadTestCategory = useCallback(async (categoryName, options = {}) => {
+    const inventory = await loadTestInventory({ category: categoryName, ...options });
+    const detail = {
+      category: categoryName,
+      summary: inventory.summary,
+      tests: inventory.tests,
+    };
     setTestCategoryDetail(detail);
-    setSelectedTestCase(null);
+    if (!options.keepSelection) {
+      setSelectedTestCase(null);
+    }
     return detail;
-  }
+  }, [loadTestInventory]);
 
-  async function loadTestCase(caseId) {
-    const detail = await requestComplianceJson(`/compliance/tests/cases/${caseId}`);
-    setSelectedTestCase(detail);
-    return detail;
-  }
+  const refreshTestingWorkspace = useCallback(async () => {
+    const [dashboard, categoryDetail] = await Promise.all([
+      loadTestDashboard(),
+      testCategoryDetail?.category ? loadTestCategory(testCategoryDetail.category) : Promise.resolve(null),
+    ]);
+    if (selectedTestCase?.test_id) {
+      await loadTestCase(selectedTestCase.test_id);
+    }
+    return { dashboard, categoryDetail };
+  }, [loadTestCase, loadTestCategory, loadTestDashboard, selectedTestCase?.test_id, testCategoryDetail?.category]);
 
-  async function loadRecordTimeline(recordId) {
+  const loadRecordTimeline = useCallback(async (recordId) => {
     if (timelineCache[recordId]) {
       return timelineCache[recordId];
     }
     const detail = await requestComplianceJson(`/compliance/records/${recordId}/timeline`);
     setTimelineCache((current) => ({ ...current, [recordId]: detail }));
     return detail;
-  }
+  }, [timelineCache]);
 
   return {
     data,
     loading,
     error,
+    testDashboard,
     testCategoryDetail,
     selectedTestCase,
     timelineCache,
@@ -116,7 +158,10 @@ export function useComplianceWorkspace(enabled = true) {
       setSelectedTestCase(null);
     },
     loadTestCategory,
+    loadTestDashboard,
+    loadTestInventory,
     loadTestCase,
+    refreshTestingWorkspace,
     loadRecordTimeline,
     createEmployee: (payload) => mutate("/compliance/directory", payload),
     updateEmployee: (employeeId, payload) => mutate(`/compliance/directory/${employeeId}`, payload, "PUT"),

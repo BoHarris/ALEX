@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from routers import protected, logout, refresh
 from routers.admin_router import router as admin_router
 from routers.compliance_router import router as compliance_router
+from routers.privacy_metrics import router as privacy_metrics_router
 from routers.webauthn_auth import router as webauthn_auth_router
 
 from routers.scans import router as scans_router
@@ -92,6 +93,7 @@ app.include_router(protected.companies_router)
 app.include_router(logout.router)
 app.include_router(refresh.router)
 app.include_router(scans_router)
+app.include_router(privacy_metrics_router)
 app.include_router(admin_router)
 app.include_router(compliance_router)
 

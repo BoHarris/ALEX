@@ -1,0 +1,41 @@
+# Backend runtime and startup stack
+alembic==1.15.2
+fastapi==0.133.0
+pydantic==2.12.5
+python-dotenv==1.2.1
+python-jose==3.5.0
+python-multipart==0.0.22
+SQLAlchemy==2.0.47
+starlette==0.52.1
+uvicorn==0.41.0
+webauthn==2.7.1
+
+# Database and API integrations
+aiohttp==3.13.3
+libsql-client==0.3.1
+requests==2.32.5
+
+# Scan pipeline and ML stack
+joblib==1.5.3
+numpy==2.4.2
+pandas==3.0.1
+scikit-learn==1.8.0
+scipy==1.17.1
+xgboost==3.2.0
+
+# File parsing and report generation
+lxml==6.0.2
+openpyxl==3.1.5
+PyPDF2==3.0.1
+python-docx==1.2.0
+reportlab==4.4.10
+xlrd==2.0.1
+
+# PII detection and anonymization
+cryptography==46.0.5
+phonenumbers==9.0.24
+presidio-analyzer==2.2.361
+presidio-anonymizer==2.2.361
+regex==2026.2.19
+spacy==3.8.11
+tldextract==5.3.1

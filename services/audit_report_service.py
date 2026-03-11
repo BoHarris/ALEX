@@ -8,6 +8,8 @@ import textwrap
 from html import unescape as html_unescape
 
 from database.models.scan_results import ScanResult
+from services.scan_service import parse_scan_result_metadata
+from utils.pii_taxonomy import get_display_name, get_policy_categories, get_policy_display_names
 
 
 def _risk_label(risk_score: int) -> str:
@@ -82,28 +84,13 @@ def _build_findings_rows(flagged_fields: list[str], total_pii_found: int) -> str
 
 
 def _parse_redacted_type_counts(scan: ScanResult) -> dict[str, int]:
-    raw_value = getattr(scan, "redacted_type_counts", None)
-    if not raw_value:
-        return {}
+    counts, _ = parse_scan_result_metadata(getattr(scan, "redacted_type_counts", None))
+    return counts
 
-    try:
-        data = json.loads(raw_value)
-    except (TypeError, json.JSONDecodeError):
-        return {}
 
-    if not isinstance(data, dict):
-        return {}
-
-    normalized: dict[str, int] = {}
-    for key, value in data.items():
-        label = str(key).strip()
-        if not label:
-            continue
-        try:
-            normalized[label] = int(value)
-        except (TypeError, ValueError):
-            continue
-    return normalized
+def _parse_detection_results(scan: ScanResult) -> list[dict[str, object]]:
+    _, detections = parse_scan_result_metadata(getattr(scan, "redacted_type_counts", None))
+    return detections
 
 
 def _build_type_count_rows(type_counts: dict[str, int], total_pii_found: int) -> str:
@@ -111,20 +98,48 @@ def _build_type_count_rows(type_counts: dict[str, int], total_pii_found: int) ->
         if total_pii_found > 0:
             return (
                 "<tr>"
+                "<td>PII_SENSITIVE_DATA</td>"
                 "<td>Sensitive Data Pattern</td>"
+                f"<td>{escape(', '.join(get_policy_display_names(get_policy_categories('PII_SENSITIVE_DATA'))))}</td>"
                 f"<td>{total_pii_found}</td>"
                 "</tr>"
             )
         return (
             "<tr>"
-            "<td colspan=\"2\">No sensitive data patterns were detected in this scan.</td>"
+            "<td colspan=\"4\">No sensitive data patterns were detected in this scan.</td>"
             "</tr>"
         )
 
     sorted_items = sorted(type_counts.items(), key=lambda item: (-item[1], item[0]))
     return "".join(
-        f"<tr><td>{escape(label)}</td><td>{count}</td></tr>"
-        for label, count in sorted_items
+        (
+            f"<tr><td>{escape(code)}</td>"
+            f"<td>{escape(get_display_name(code))}</td>"
+            f"<td>{escape(', '.join(get_policy_display_names(get_policy_categories(code))))}</td>"
+            f"<td>{count}</td></tr>"
+        )
+        for code, count in sorted_items
+    )
+
+
+def _build_detection_reasoning_rows(detections: list[dict[str, object]]) -> str:
+    if not detections:
+        return (
+            "<tr>"
+            "<td colspan=\"6\">No explainable detection metadata was recorded for this scan.</td>"
+            "</tr>"
+        )
+
+    return "".join(
+        "<tr>"
+        f"<td>{escape(str(detection.get('column', 'Unknown')))}</td>"
+        f"<td>{escape(str(detection.get('detected_type') or detection.get('detected_as') or 'PII_SENSITIVE_DATA'))}</td>"
+        f"<td>{escape(str(detection.get('display_name', get_display_name(str(detection.get('detected_type') or detection.get('detected_as') or '')))))}</td>"
+        f"<td>{escape(', '.join(get_policy_display_names(detection.get('policy_categories', []))))}</td>"
+        f"<td>{float(detection.get('confidence_score', 0.0)):.2f}</td>"
+        f"<td>{escape(', '.join(str(signal) for signal in detection.get('signals', [])))}</td>"
+        "</tr>"
+        for detection in detections
     )
 
 
@@ -136,7 +151,9 @@ def generate_audit_report_html(scan: ScanResult) -> str:
     generated_timestamp = _format_generated_at()
     findings_rows = _build_findings_rows(flagged_fields, scan.total_pii_found)
     type_counts = _parse_redacted_type_counts(scan)
+    detection_results = _parse_detection_results(scan)
     type_count_rows = _build_type_count_rows(type_counts, scan.total_pii_found)
+    detection_reasoning_rows = _build_detection_reasoning_rows(detection_results)
     file_type = _display_file_type(scan)
     risk_explanation = _risk_explanation(risk_level)
 
@@ -283,10 +300,23 @@ def generate_audit_report_html(scan: ScanResult) -> str:
       <h2>Detected and Redacted Data Types</h2>
       <table>
         <thead>
-          <tr><th>Data Type</th><th>Redacted Count</th></tr>
+          <tr><th>Taxonomy</th><th>Category</th><th>Policy Categories</th><th>Redacted Count</th></tr>
         </thead>
         <tbody>
           {type_count_rows}
+        </tbody>
+      </table>
+    </section>
+
+    <section class="section">
+      <h2>Detection Reasoning</h2>
+      <p class="muted">Per-field confidence scores are derived from explicit detection signals and remain separate from the scan-level risk score.</p>
+      <table>
+        <thead>
+          <tr><th>Field</th><th>Taxonomy</th><th>Category</th><th>Policy Categories</th><th>Confidence Score</th><th>Signals</th></tr>
+        </thead>
+        <tbody>
+          {detection_reasoning_rows}
         </tbody>
       </table>
     </section>

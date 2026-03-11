@@ -18,6 +18,7 @@ from database.models.user import User
 from dependencies.tier_guard import require_company_admin, require_security_admin
 from routers import redacted_router
 from services.audit_service import record_audit_event
+from services.audit_service import parse_audit_event_metadata
 from services.retention_service import apply_retention_state
 from services.security_service import extract_request_security_context, register_failed_login
 from services.security_state_store import SecurityStateStoreError, get_counter, increment_counter
@@ -67,14 +68,18 @@ def test_audit_log_creation_writes_central_log_and_legacy_event():
         description="Login succeeded.",
         target_type="user",
         target_id=str(user.id),
+        event_metadata={"user_id": user.id, "status": "success"},
     )
     session.commit()
 
     assert session.query(AuditLog).count() == 1
     assert session.query(AuditEvent).count() == 1
     audit_log = session.query(AuditLog).first()
+    audit_event = session.query(AuditEvent).first()
     assert audit_log.event_type == "login_success"
     assert audit_log.event_category == "authentication"
+    assert audit_event.event_category == "authentication"
+    assert parse_audit_event_metadata(audit_event.event_metadata)["status"] == "success"
 
 
 def test_rbac_enforcement_allows_org_admin_and_blocks_standard_user():

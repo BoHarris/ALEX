@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "./button";
 import { apiUrl } from "../utils/api";
@@ -69,12 +69,65 @@ function serializeAttestation(credential) {
   };
 }
 
+const STATUS_REQUEST_TIMEOUT_MS = 5000;
+
 export default function EmployeeLoginForm() {
   const [email, setEmail] = useState("bo.harris@boharrisllc.internal");
   const [error, setError] = useState(null);
   const [message, setMessage] = useState(null);
-  const [loading, setLoading] = useState(false);
+  const [activeAction, setActiveAction] = useState(null);
+  const [statusLoading, setStatusLoading] = useState(true);
+  const [employeeStatus, setEmployeeStatus] = useState(null);
   const navigate = useNavigate();
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadEmployeeStatus() {
+      const safeEmail = email.trim().toLowerCase();
+      if (!safeEmail) {
+        setEmployeeStatus(null);
+        setStatusLoading(false);
+        return;
+      }
+
+      setStatusLoading(true);
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), STATUS_REQUEST_TIMEOUT_MS);
+      try {
+        setError(null);
+        const response = await fetch(apiUrl("/auth/employee/webauthn/status"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          signal: controller.signal,
+          body: JSON.stringify({ email: safeEmail }),
+        });
+        const { data, text } = await readResponseData(response);
+        if (!response.ok) {
+          throw new Error(getResponseMessage(data, "Unable to check employee access status", text));
+        }
+        if (!cancelled) {
+          setEmployeeStatus(data);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setEmployeeStatus(null);
+          setError(err.name === "AbortError" ? "Unable to verify employee passkey status. Check that the backend is running." : err.message);
+        }
+      } finally {
+        window.clearTimeout(timeoutId);
+        if (!cancelled) {
+          setStatusLoading(false);
+        }
+      }
+    }
+
+    loadEmployeeStatus();
+    return () => {
+      cancelled = true;
+    };
+  }, [email]);
 
   async function runEmployeeLogin() {
     const safeEmail = email.trim().toLowerCase();
@@ -132,11 +185,12 @@ export default function EmployeeLoginForm() {
     if (!verifyRes.ok) {
       throw new Error(getResponseMessage(data, "Employee passkey enrollment failed", text));
     }
+    setEmployeeStatus({ employee_found: true, passkey_enrolled: true, is_active: true });
     setMessage(data?.message || "Employee passkey enrolled. You can sign in now.");
   }
 
   async function handleAction(action) {
-    setLoading(true);
+    setActiveAction(action);
     setError(null);
     setMessage(null);
     try {
@@ -151,8 +205,36 @@ export default function EmployeeLoginForm() {
     } catch (err) {
       setError(err.message);
     } finally {
-      setLoading(false);
+      setActiveAction(null);
     }
+  }
+
+  const canAttemptLogin = Boolean(
+    employeeStatus?.employee_found &&
+    employeeStatus?.is_active &&
+    employeeStatus?.passkey_enrolled,
+  );
+  const loginInProgress = activeAction === "login";
+  const enrollInProgress = activeAction === "enroll";
+  const actionInProgress = activeAction !== null;
+
+  function renderStatusMessage() {
+    if (statusLoading) {
+      return "Checking employee passkey status...";
+    }
+    if (!employeeStatus) {
+      return "Employee passkey status could not be verified. You can enroll a passkey, then try again.";
+    }
+    if (!employeeStatus?.employee_found) {
+      return "No internal employee account was found for this email.";
+    }
+    if (!employeeStatus?.is_active) {
+      return "This employee account is inactive.";
+    }
+    if (!employeeStatus?.passkey_enrolled) {
+      return "No employee passkey is enrolled for this account yet. Enroll a passkey before signing in.";
+    }
+    return "Employee passkey is enrolled. You can sign in to the compliance workspace.";
   }
 
   return (
@@ -164,6 +246,7 @@ export default function EmployeeLoginForm() {
       <p className="mt-2 text-center text-xs text-app-muted">
         Initial seeded employee account: <span className="font-semibold">{email}</span>
       </p>
+      <p className="mt-3 text-center text-xs text-app-secondary" role="status">{renderStatusMessage()}</p>
       {error ? <p className="mt-4 text-center text-red-500" role="alert">{error}</p> : null}
       {message ? <p className="mt-4 text-center text-emerald-600" role="status">{message}</p> : null}
       <div className="mt-6 space-y-4">
@@ -181,11 +264,11 @@ export default function EmployeeLoginForm() {
           required
         />
         <div className="flex flex-wrap gap-3">
-          <Button type="button" className="flex-1 py-3 font-semibold" disabled={loading} onClick={() => handleAction("login")}>
-            {loading ? "Working..." : "Sign in to Compliance Workspace"}
+          <Button type="button" className="flex-1 py-3 font-semibold" disabled={actionInProgress || statusLoading || !canAttemptLogin} onClick={() => handleAction("login")}>
+            {loginInProgress ? "Signing In..." : "Sign in to Compliance Workspace"}
           </Button>
-          <Button type="button" className="flex-1 py-3 font-semibold" disabled={loading} onClick={() => handleAction("enroll")}>
-            Enroll Employee Passkey
+          <Button type="button" className="flex-1 py-3 font-semibold" disabled={actionInProgress} onClick={() => handleAction("enroll")}>
+            {enrollInProgress ? "Enrolling Passkey..." : "Enroll Employee Passkey"}
           </Button>
         </div>
       </div>
