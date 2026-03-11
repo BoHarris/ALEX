@@ -8,6 +8,7 @@ import textwrap
 from html import unescape as html_unescape
 
 from database.models.scan_results import ScanResult
+from services.scan_service import parse_scan_result_metadata
 
 
 def _risk_label(risk_score: int) -> str:
@@ -82,28 +83,13 @@ def _build_findings_rows(flagged_fields: list[str], total_pii_found: int) -> str
 
 
 def _parse_redacted_type_counts(scan: ScanResult) -> dict[str, int]:
-    raw_value = getattr(scan, "redacted_type_counts", None)
-    if not raw_value:
-        return {}
+    counts, _ = parse_scan_result_metadata(getattr(scan, "redacted_type_counts", None))
+    return counts
 
-    try:
-        data = json.loads(raw_value)
-    except (TypeError, json.JSONDecodeError):
-        return {}
 
-    if not isinstance(data, dict):
-        return {}
-
-    normalized: dict[str, int] = {}
-    for key, value in data.items():
-        label = str(key).strip()
-        if not label:
-            continue
-        try:
-            normalized[label] = int(value)
-        except (TypeError, ValueError):
-            continue
-    return normalized
+def _parse_detection_results(scan: ScanResult) -> list[dict[str, object]]:
+    _, detections = parse_scan_result_metadata(getattr(scan, "redacted_type_counts", None))
+    return detections
 
 
 def _build_type_count_rows(type_counts: dict[str, int], total_pii_found: int) -> str:
@@ -128,6 +114,25 @@ def _build_type_count_rows(type_counts: dict[str, int], total_pii_found: int) ->
     )
 
 
+def _build_detection_reasoning_rows(detections: list[dict[str, object]]) -> str:
+    if not detections:
+        return (
+            "<tr>"
+            "<td colspan=\"4\">No explainable detection metadata was recorded for this scan.</td>"
+            "</tr>"
+        )
+
+    return "".join(
+        "<tr>"
+        f"<td>{escape(str(detection.get('column', 'Unknown')))}</td>"
+        f"<td>{escape(str(detection.get('display_name', detection.get('detected_as', 'Sensitive Data Pattern'))))}</td>"
+        f"<td>{float(detection.get('confidence_score', 0.0)):.2f}</td>"
+        f"<td>{escape(', '.join(str(signal) for signal in detection.get('signals', [])))}</td>"
+        "</tr>"
+        for detection in detections
+    )
+
+
 def generate_audit_report_html(scan: ScanResult) -> str:
     flagged_fields = [item.strip() for item in (scan.pii_types_found or "").split(",") if item.strip()]
     risk_level = _risk_label(scan.risk_score)
@@ -136,7 +141,9 @@ def generate_audit_report_html(scan: ScanResult) -> str:
     generated_timestamp = _format_generated_at()
     findings_rows = _build_findings_rows(flagged_fields, scan.total_pii_found)
     type_counts = _parse_redacted_type_counts(scan)
+    detection_results = _parse_detection_results(scan)
     type_count_rows = _build_type_count_rows(type_counts, scan.total_pii_found)
+    detection_reasoning_rows = _build_detection_reasoning_rows(detection_results)
     file_type = _display_file_type(scan)
     risk_explanation = _risk_explanation(risk_level)
 
@@ -287,6 +294,19 @@ def generate_audit_report_html(scan: ScanResult) -> str:
         </thead>
         <tbody>
           {type_count_rows}
+        </tbody>
+      </table>
+    </section>
+
+    <section class="section">
+      <h2>Detection Reasoning</h2>
+      <p class="muted">Per-field confidence scores are derived from explicit detection signals and remain separate from the scan-level risk score.</p>
+      <table>
+        <thead>
+          <tr><th>Field</th><th>Detected Type</th><th>Confidence Score</th><th>Signals</th></tr>
+        </thead>
+        <tbody>
+          {detection_reasoning_rows}
         </tbody>
       </table>
     </section>

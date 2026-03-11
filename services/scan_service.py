@@ -7,7 +7,7 @@ import os
 import re
 import uuid
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -42,6 +42,8 @@ MAX_SCAN_ROWS = max(1, int(os.getenv("MAX_SCAN_ROWS", "50000")))
 MAX_SCAN_CELLS = max(1, int(os.getenv("MAX_SCAN_CELLS", "500000")))
 MAX_SCAN_COLUMNS = max(1, int(os.getenv("MAX_SCAN_COLUMNS", "200")))
 XML_TAG_INVALID_CHARS_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+GENERIC_DETECTION_TYPE = "PII_SENSITIVE_DATA"
+GENERIC_DETECTION_LABEL = "Sensitive Data Pattern"
 
 
 @dataclass(frozen=True)
@@ -60,6 +62,7 @@ class ScanPipelineResult:
     redacted_count: int
     total_values: int
     redacted_type_counts: dict[str, int]
+    detection_results: list[dict[str, object]]
     scan_id: int
 
 
@@ -69,6 +72,15 @@ class ScanLimits:
     max_cells: int = MAX_SCAN_CELLS
     max_columns: int = MAX_SCAN_COLUMNS
     chunk_rows: int = SCAN_CHUNK_ROWS
+
+
+@dataclass(frozen=True)
+class DetectionResult:
+    column: str
+    detected_as: str
+    display_name: str
+    confidence_score: float
+    signals: list[str]
 
 
 class ScanLimitError(ValueError):
@@ -140,6 +152,234 @@ def _contains_zip_code_pattern(values: list[str]) -> bool:
 
 def _contains_phone_pattern(values: list[str]) -> bool:
     return any(PHONE_RE.search(str(value)) for value in values) if values else False
+
+
+def _contains_email_pattern(values: list[str]) -> bool:
+    return any(EMAIL_RE.search(str(value)) for value in values) if values else False
+
+
+def _contains_ssn_pattern(values: list[str]) -> bool:
+    return any(SSN_RE.search(str(value)) for value in values) if values else False
+
+
+def _contains_ip_pattern(values: list[str]) -> bool:
+    return any(IP_RE.search(str(value)) for value in values) if values else False
+
+
+def _column_sample_values(series: pd.Series) -> list[str]:
+    values = series.dropna().astype(str)
+    if values.empty:
+        return []
+    if len(values) <= MAX_FEATURE_SAMPLE_VALUES:
+        return values.tolist()
+    indices = np.linspace(0, len(values) - 1, num=MAX_FEATURE_SAMPLE_VALUES, dtype=int)
+    return values.iloc[indices].tolist()
+
+
+def _normalize_column_tokens(column_name: str) -> set[str]:
+    normalized = re.sub(r"[^a-z0-9]+", " ", str(column_name).lower())
+    return {token for token in normalized.split() if token}
+
+
+def _column_has_keyword(column_name: str, *keywords: str) -> bool:
+    column_tokens = _normalize_column_tokens(column_name)
+    normalized_text = re.sub(r"[^a-z0-9]+", " ", str(column_name).lower())
+    for keyword in keywords:
+        if " " in keyword:
+            if keyword in normalized_text:
+                return True
+        elif keyword in column_tokens:
+            return True
+    return False
+
+
+def _candidate_detection(
+    *,
+    column_name: str,
+    values: list[str],
+    ml_detected: bool,
+    detected_as: str,
+    display_name: str,
+    keyword_signal: tuple[str, tuple[str, ...], float] | None = None,
+    pattern_signal: tuple[str, bool, float] | None = None,
+    format_signal: tuple[str, bool, float] | None = None,
+    context_signal: tuple[str, bool, float] | None = None,
+) -> DetectionResult | None:
+    signals: list[str] = []
+    score = 0.0
+
+    if keyword_signal and _column_has_keyword(column_name, *keyword_signal[1]):
+        signals.append(keyword_signal[0])
+        score += keyword_signal[2]
+    if pattern_signal and pattern_signal[1]:
+        signals.append(pattern_signal[0])
+        score += pattern_signal[2]
+    if format_signal and format_signal[1]:
+        signals.append(format_signal[0])
+        score += format_signal[2]
+    if context_signal and context_signal[1]:
+        signals.append(context_signal[0])
+        score += context_signal[2]
+    if ml_detected and signals:
+        signals.append("ml_model_prediction")
+        score += 0.18
+
+    if not signals:
+        return None
+
+    return DetectionResult(
+        column=column_name,
+        detected_as=detected_as,
+        display_name=display_name,
+        confidence_score=round(min(score, 0.99), 2),
+        signals=signals,
+    )
+
+
+def _build_detection_result(*, column_name: str, values: list[str], ml_detected: bool) -> DetectionResult | None:
+    candidates = [
+        _candidate_detection(
+            column_name=column_name,
+            values=values,
+            ml_detected=ml_detected,
+            detected_as="PII_EMAIL",
+            display_name="Email Address",
+            keyword_signal=("column_name_keyword_email", ("email", "e mail"), 0.24),
+            pattern_signal=("pattern_match_email_regex", _contains_email_pattern(values), 0.44),
+            format_signal=("value_format_match_email", _contains_email_pattern(values), 0.12),
+        ),
+        _candidate_detection(
+            column_name=column_name,
+            values=values,
+            ml_detected=ml_detected,
+            detected_as="PII_PHONE",
+            display_name="Phone Number",
+            keyword_signal=("column_name_keyword_phone", ("phone", "telephone", "mobile", "cell", "tel"), 0.24),
+            pattern_signal=("pattern_match_phone_regex", _contains_phone_pattern(values), 0.42),
+            format_signal=("value_format_match_phone", _contains_phone_pattern(values), 0.14),
+        ),
+        _candidate_detection(
+            column_name=column_name,
+            values=values,
+            ml_detected=ml_detected,
+            detected_as="PII_SSN",
+            display_name="Social Security Number",
+            keyword_signal=("column_name_keyword_ssn", ("ssn", "social security"), 0.24),
+            pattern_signal=("pattern_match_ssn_regex", _contains_ssn_pattern(values), 0.5),
+        ),
+        _candidate_detection(
+            column_name=column_name,
+            values=values,
+            ml_detected=ml_detected,
+            detected_as="PII_IP_ADDRESS",
+            display_name="IP Address",
+            keyword_signal=("column_name_keyword_ip", ("ip", "ip address", "ipv4", "ipv6"), 0.24),
+            pattern_signal=("pattern_match_ip_regex", _contains_ip_pattern(values), 0.5),
+        ),
+        _candidate_detection(
+            column_name=column_name,
+            values=values,
+            ml_detected=ml_detected,
+            detected_as="PII_ADDRESS",
+            display_name="Location",
+            keyword_signal=("column_name_keyword_address", ("address", "street", "city", "zip", "postal"), 0.22),
+            format_signal=("value_format_match_address", _contains_street_suffix(values), 0.26),
+            context_signal=("context_match_address_geography", _contains_city_name(values) or _contains_zip_code_pattern(values), 0.16),
+        ),
+        _candidate_detection(
+            column_name=column_name,
+            values=values,
+            ml_detected=ml_detected,
+            detected_as="PII_NAME",
+            display_name="Full Name",
+            keyword_signal=("column_name_keyword_name", ("name", "first name", "last name", "full name"), 0.22),
+            format_signal=("value_format_match_name", _contains_known_name(values), 0.24),
+        ),
+        _candidate_detection(
+            column_name=column_name,
+            values=values,
+            ml_detected=ml_detected,
+            detected_as="PII_DATE_OF_BIRTH",
+            display_name="Date of Birth / Date",
+            keyword_signal=("column_name_keyword_dob", ("dob", "birth", "date of birth"), 0.22),
+            pattern_signal=("pattern_match_dob_regex", _contains_dob_pattern(values), 0.36),
+            context_signal=("context_match_age_sensitive_column", _column_has_keyword(column_name, "dob", "birth"), 0.12),
+        ),
+    ]
+
+    scored_candidates = [candidate for candidate in candidates if candidate is not None]
+    if scored_candidates:
+        return max(scored_candidates, key=lambda candidate: (candidate.confidence_score, candidate.display_name))
+    if ml_detected:
+        return DetectionResult(
+            column=column_name,
+            detected_as=GENERIC_DETECTION_TYPE,
+            display_name=GENERIC_DETECTION_LABEL,
+            confidence_score=0.18,
+            signals=["ml_model_prediction"],
+        )
+    return None
+
+
+def build_scan_result_metadata(
+    *,
+    redacted_type_counts: dict[str, int],
+    detection_results: list[dict[str, object]],
+) -> dict[str, object]:
+    return {
+        "counts": dict(redacted_type_counts),
+        "detections": list(detection_results),
+    }
+
+
+def parse_scan_result_metadata(raw_value: str | None) -> tuple[dict[str, int], list[dict[str, object]]]:
+    if not raw_value:
+        return {}, []
+    try:
+        data = json.loads(raw_value)
+    except (TypeError, json.JSONDecodeError):
+        return {}, []
+    if not isinstance(data, dict):
+        return {}, []
+
+    raw_counts = data.get("counts", data)
+    counts: dict[str, int] = {}
+    if isinstance(raw_counts, dict):
+        for key, value in raw_counts.items():
+            label = str(key).strip()
+            if not label:
+                continue
+            try:
+                counts[label] = int(value)
+            except (TypeError, ValueError):
+                continue
+
+    detections: list[dict[str, object]] = []
+    raw_detections = data.get("detections", [])
+    if isinstance(raw_detections, list):
+        for item in raw_detections:
+            if not isinstance(item, dict):
+                continue
+            column = str(item.get("column", "")).strip()
+            detected_as = str(item.get("detected_as", "")).strip()
+            display_name = str(item.get("display_name", "")).strip() or GENERIC_DETECTION_LABEL
+            signals = item.get("signals", [])
+            if not column or not detected_as or not isinstance(signals, list):
+                continue
+            try:
+                confidence_score = round(float(item.get("confidence_score", 0.0)), 2)
+            except (TypeError, ValueError):
+                continue
+            detections.append(
+                {
+                    "column": column,
+                    "detected_as": detected_as,
+                    "display_name": display_name,
+                    "confidence_score": max(0.0, min(confidence_score, 1.0)),
+                    "signals": [str(signal) for signal in signals if str(signal).strip()],
+                }
+            )
+    return counts, detections
 
 
 def _raise_scan_limit(detail: str) -> None:
@@ -285,16 +525,7 @@ def _build_feature_dataframe_from_samples(features: list[str], parsed_values: li
 
 def _build_feature_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     features = df.columns.tolist()
-    def column_sample_values(series: pd.Series) -> list[str]:
-        values = series.dropna().astype(str)
-        if values.empty:
-            return []
-        if len(values) <= MAX_FEATURE_SAMPLE_VALUES:
-            return values.tolist()
-        indices = np.linspace(0, len(values) - 1, num=MAX_FEATURE_SAMPLE_VALUES, dtype=int)
-        return values.iloc[indices].tolist()
-
-    value_samples = [column_sample_values(df[col]) for col in df.columns]
+    value_samples = [_column_sample_values(df[col]) for col in df.columns]
     return _build_feature_dataframe_from_samples(features, value_samples), features
 
 
@@ -375,7 +606,7 @@ def _write_redacted_file(
         redacted_df.to_csv(redacted_path, index=False)
 
 
-def _predict_pii_columns(df: pd.DataFrame, model=None) -> list[str]:
+def _predict_pii_columns(df: pd.DataFrame, model=None) -> tuple[list[str], list[dict[str, object]]]:
     x, features = _build_feature_dataframe(df)
     active_model = model or get_scan_model()
     predictions = active_model.predict(
@@ -402,7 +633,17 @@ def _predict_pii_columns(df: pd.DataFrame, model=None) -> list[str]:
             ]
         ]
     )
-    return [col for col, is_pii in zip(features, predictions) if is_pii == 0]
+    sample_map = {column: _column_sample_values(df[column]) for column in features}
+    pii_columns: list[str] = []
+    detection_results: list[dict[str, object]] = []
+    for column, is_pii in zip(features, predictions):
+        if is_pii != 0:
+            continue
+        pii_columns.append(column)
+        detection_result = _build_detection_result(column_name=column, values=sample_map.get(column, []), ml_detected=True)
+        if detection_result is not None:
+            detection_results.append(asdict(detection_result))
+    return pii_columns, detection_results
 
 
 def _apply_redactions(
@@ -480,7 +721,7 @@ def _predict_pii_columns_from_sample_map(
     features: list[str],
     sample_map: dict[str, list[str]],
     model=None,
-) -> list[str]:
+) -> tuple[list[str], list[dict[str, object]]]:
     feature_frame = _build_feature_dataframe_from_samples(features, [sample_map.get(column, []) for column in features])
     active_model = model or get_scan_model()
     predictions = active_model.predict(
@@ -507,7 +748,16 @@ def _predict_pii_columns_from_sample_map(
             ]
         ]
     )
-    return [col for col, is_pii in zip(features, predictions) if is_pii == 0]
+    pii_columns: list[str] = []
+    detection_results: list[dict[str, object]] = []
+    for column, is_pii in zip(features, predictions):
+        if is_pii != 0:
+            continue
+        pii_columns.append(column)
+        detection_result = _build_detection_result(column_name=column, values=sample_map.get(column, []), ml_detected=True)
+        if detection_result is not None:
+            detection_results.append(asdict(detection_result))
+    return pii_columns, detection_results
 
 
 def _write_chunked_redacted_output(
@@ -561,6 +811,7 @@ def _persist_scan_result(
     pii_columns: list[str],
     total_redacted: int,
     redacted_type_counts: dict[str, int],
+    detection_results: list[dict[str, object]],
     public_redacted_path: str,
 ) -> int:
     db = None
@@ -575,7 +826,14 @@ def _persist_scan_result(
             file_type=ext.lstrip("."),
             risk_score=risk_score,
             pii_types_found=pii_types_string,
-            redacted_type_counts=json.dumps(redacted_type_counts) if redacted_type_counts else None,
+            redacted_type_counts=json.dumps(
+                build_scan_result_metadata(
+                    redacted_type_counts=redacted_type_counts,
+                    detection_results=detection_results,
+                )
+            )
+            if redacted_type_counts or detection_results
+            else None,
             total_pii_found=total_redacted,
             redacted_file_path=public_redacted_path,
             status="active",
@@ -662,7 +920,7 @@ def run_scan_pipeline(
             ext=ext,
             limits=effective_limits,
         )
-        pii_columns = _predict_pii_columns_from_sample_map(
+        pii_columns, detection_results = _predict_pii_columns_from_sample_map(
             features=features,
             sample_map=sample_map,
             model=model,
@@ -683,7 +941,7 @@ def run_scan_pipeline(
             ext=ext,
             limits=effective_limits,
         )
-        pii_columns = _predict_pii_columns(df, model=model)
+        pii_columns, detection_results = _predict_pii_columns(df, model=model)
         redacted_df, total_redacted, total_values, redacted_type_counts = _apply_redactions(
             df,
             pii_columns,
@@ -700,6 +958,7 @@ def run_scan_pipeline(
         pii_columns=pii_columns,
         total_redacted=total_redacted,
         redacted_type_counts=redacted_type_counts,
+        detection_results=detection_results,
         public_redacted_path=redacted_path,
     )
 
@@ -722,5 +981,6 @@ def run_scan_pipeline(
         redacted_count=total_redacted,
         total_values=total_values,
         redacted_type_counts=redacted_type_counts,
+        detection_results=detection_results,
         scan_id=scan_id,
     )

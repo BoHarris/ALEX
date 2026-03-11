@@ -127,9 +127,10 @@ def test_predict_pii_columns_uses_initialized_model():
                 "notes": ["safe", "safe"],
             }
         )
-        pii_columns = scan_service._predict_pii_columns(frame)
+        pii_columns, detection_results = scan_service._predict_pii_columns(frame)
     finally:
         scan_service.set_scan_model(previous_model)
 
     assert pii_columns == ["email"]
+    assert detection_results[0]["detected_as"] == "PII_EMAIL"
     assert model.calls == 1

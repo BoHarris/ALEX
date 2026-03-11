@@ -88,6 +88,15 @@ def test_post_scans_creates_scan_and_legacy_predict_route_is_not_mounted(monkeyp
             redacted_count=2,
             total_values=4,
             redacted_type_counts={"Email Address": 2},
+            detection_results=[
+                {
+                    "column": "email",
+                    "detected_as": "PII_EMAIL",
+                    "display_name": "Email Address",
+                    "confidence_score": 0.86,
+                    "signals": ["pattern_match_email_regex", "column_name_keyword_email", "ml_model_prediction"],
+                }
+            ],
             scan_id=55,
         ),
     )
@@ -128,7 +137,7 @@ def test_get_scan_returns_scan_metadata():
         file_type="csv",
         risk_score=25,
         pii_types_found="email",
-        redacted_type_counts='{"Email Address": 2}',
+        redacted_type_counts='{"counts": {"Email Address": 2}, "detections": [{"column": "email", "detected_as": "PII_EMAIL", "display_name": "Email Address", "confidence_score": 0.86, "signals": ["pattern_match_email_regex", "column_name_keyword_email", "ml_model_prediction"]}]}',
         total_pii_found=2,
         redacted_file_path="redacted/report.csv",
         status="active",
@@ -148,6 +157,7 @@ def test_get_scan_returns_scan_metadata():
         assert payload["filename"] == "report.csv"
         assert payload["redacted_file"] == f"/scans/{scan.id}/download"
         assert payload["report_file"] == f"/scans/{scan.id}/report"
+        assert payload["detection_results"][0]["detected_as"] == "PII_EMAIL"
     finally:
         session.close()
 
@@ -243,6 +253,7 @@ def test_post_scans_accepts_xls_when_backend_supports_it(monkeypatch):
             redacted_count=0,
             total_values=0,
             redacted_type_counts={},
+            detection_results=[],
             scan_id=88,
         ),
     )

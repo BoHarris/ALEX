@@ -23,7 +23,7 @@ from dependencies.tier_guard import get_current_user_context
 from services.audit_report_service import generate_audit_report_html, render_report_pdf_from_html
 from services.audit_service import record_audit_event
 from services.retention_service import apply_retention_state, apply_retention_state_bulk
-from services.scan_service import ScanContext, ScanLimitError, run_scan_pipeline
+from services.scan_service import ScanContext, ScanLimitError, parse_scan_result_metadata, run_scan_pipeline
 from services.security_service import extract_request_security_context, register_scan_activity
 from utils.api_errors import error_payload
 from utils.constants import SUPPORTED_EXTENSIONS, SUPPORTED_EXTENSIONS_SORTED
@@ -48,6 +48,7 @@ class ScanResultPayload(BaseModel):
     redacted_count: int
     total_values: int
     redaction_summary: dict[str, int]
+    detection_results: list[dict[str, object]]
 
 
 def _is_text_payload(file_bytes: bytes) -> bool:
@@ -159,25 +160,13 @@ def _company_allowed_extensions(db: Session, company_id: int | None) -> set[str]
 
 
 def _parse_redacted_type_counts(raw_value: str | None) -> dict[str, int]:
-    if not raw_value:
-        return {}
-    try:
-        data = json.loads(raw_value)
-    except (TypeError, json.JSONDecodeError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
+    counts, _ = parse_scan_result_metadata(raw_value)
+    return counts
 
-    normalized: dict[str, int] = {}
-    for key, value in data.items():
-        label = str(key).strip()
-        if not label:
-            continue
-        try:
-            normalized[label] = int(value)
-        except (TypeError, ValueError):
-            continue
-    return normalized
+
+def _parse_detection_results(raw_value: str | None) -> list[dict[str, object]]:
+    _, detections = parse_scan_result_metadata(raw_value)
+    return detections
 
 
 def _serialize_scan(scan: ScanResult, *, include_submitter: bool) -> dict:
@@ -189,6 +178,7 @@ def _serialize_scan(scan: ScanResult, *, include_submitter: bool) -> dict:
         "total_pii_found": scan.total_pii_found,
         "redacted_count": scan.total_pii_found,
         "redacted_type_counts": _parse_redacted_type_counts(scan.redacted_type_counts),
+        "detection_results": _parse_detection_results(scan.redacted_type_counts),
         "pii_types_found": [item.strip() for item in (scan.pii_types_found or "").split(",") if item.strip()],
         "status": scan.status if scan.status else ("ready" if scan.redacted_file_path else "failed"),
         "is_archived": scan.status in {"archived", "expired"},
@@ -423,6 +413,7 @@ async def create_scan(
             redacted_count=result.redacted_count,
             total_values=result.total_values,
             redaction_summary=result.redacted_type_counts,
+            detection_results=result.detection_results,
         )
     except ScanLimitError as exc:
         if reserved_quota:
