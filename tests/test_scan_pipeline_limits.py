@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 from fastapi import HTTPException, UploadFile
 
-from routers import predict as predict_router
+from routers import scans as scans_router
 from services import scan_service
 
 
@@ -130,20 +130,20 @@ def test_chunked_scan_pipeline_uses_multiple_chunks_for_large_csv(monkeypatch):
 def test_predict_returns_payload_too_large_for_scan_limit(monkeypatch):
     base = _make_local_test_dir()
     monkeypatch.chdir(base)
-    monkeypatch.setattr(predict_router, "record_audit_event", lambda *args, **kwargs: None)
-    monkeypatch.setattr(predict_router, "register_scan_activity", lambda *args, **kwargs: None)
-    monkeypatch.setattr(predict_router, "reserve_scan_quota", lambda *args, **kwargs: True)
-    monkeypatch.setattr(predict_router, "release_scan_quota_reservation", lambda *args, **kwargs: None)
-    monkeypatch.setattr(predict_router, "extract_request_security_context", lambda request: {})
+    monkeypatch.setattr(scans_router, "record_audit_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(scans_router, "register_scan_activity", lambda *args, **kwargs: None)
+    monkeypatch.setattr(scans_router, "reserve_scan_quota", lambda *args, **kwargs: True)
+    monkeypatch.setattr(scans_router, "release_scan_quota_reservation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(scans_router, "extract_request_security_context", lambda request: {})
 
     async def _inline_run_in_threadpool(func):
         return func()
 
-    monkeypatch.setattr(predict_router, "run_in_threadpool", _inline_run_in_threadpool)
+    monkeypatch.setattr(scans_router, "run_in_threadpool", _inline_run_in_threadpool)
     monkeypatch.setattr(
-        predict_router,
+        scans_router,
         "run_scan_pipeline",
-        lambda **kwargs: (_ for _ in ()).throw(predict_router.ScanLimitError("Uploaded file exceeds allowed processing limits")),
+        lambda **kwargs: (_ for _ in ()).throw(scans_router.ScanLimitError("Uploaded file exceeds allowed processing limits")),
     )
 
     class _AppState:
@@ -165,10 +165,10 @@ def test_predict_returns_payload_too_large_for_scan_limit(monkeypatch):
     try:
         with pytest.raises(HTTPException) as exc:
             asyncio.run(
-                predict_router.predict(
-                    request=_Request(),
-                    file=upload,
-                    user_info={"user_id": 1, "company_id": None, "tier": "free"},
+            scans_router.create_scan(
+                request=_Request(),
+                file=upload,
+                user_info={"user_id": 1, "company_id": None, "tier": "free"},
                     db=_Db(),
                     aggressive=False,
                 )

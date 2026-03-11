@@ -43,7 +43,7 @@ export default function PiiSentinelUI() {
     const formData = new FormData();
     formData.append("file", file);
     try {
-      const res = await authFetch("/predict/", {
+      const res = await authFetch("/scans", {
         method: "POST",
         body: formData,
       });
