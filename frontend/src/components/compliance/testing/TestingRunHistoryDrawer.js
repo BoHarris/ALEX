@@ -57,10 +57,10 @@ export default function TestingRunHistoryDrawer({ open, test, employees, onClose
       onClose={onClose}
       title={title}
       subtitle={subtitle}
-      side="left"
-      widthClass="max-w-2xl"
-      containerClass="pt-20 sm:pt-24 sm:px-4 sm:pb-4"
-      panelClass="rounded-r-[2rem] border-y sm:rounded-[2rem]"
+      side="center"
+      widthClass="max-w-5xl"
+      containerClass="px-4 py-20 sm:px-6 sm:py-24"
+      panelClass="rounded-[2rem]"
     >
       {test ? (
         <div className="space-y-5">
