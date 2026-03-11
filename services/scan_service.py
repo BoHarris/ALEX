@@ -23,6 +23,19 @@ from database.models.scan_results import ScanResult
 from services.retention_service import build_retention_expiration, resolve_retention_days
 from services.audit_service import record_audit_event
 from utils.constants import SUPPORTED_EXTENSIONS
+from utils.pii_taxonomy import (
+    PII_ADDRESS,
+    PII_DATE_OF_BIRTH,
+    PII_EMAIL,
+    PII_IP_ADDRESS,
+    PII_NAME,
+    PII_PHONE,
+    PII_SENSITIVE_DATA,
+    PII_SSN,
+    get_display_name,
+    get_policy_categories,
+    map_legacy_label_to_taxonomy,
+)
 from utils.redaction import scan_and_redact_column_with_details
 
 logger = logging.getLogger(__name__)
@@ -42,8 +55,6 @@ MAX_SCAN_ROWS = max(1, int(os.getenv("MAX_SCAN_ROWS", "50000")))
 MAX_SCAN_CELLS = max(1, int(os.getenv("MAX_SCAN_CELLS", "500000")))
 MAX_SCAN_COLUMNS = max(1, int(os.getenv("MAX_SCAN_COLUMNS", "200")))
 XML_TAG_INVALID_CHARS_RE = re.compile(r"[^A-Za-z0-9_.-]+")
-GENERIC_DETECTION_TYPE = "PII_SENSITIVE_DATA"
-GENERIC_DETECTION_LABEL = "Sensitive Data Pattern"
 
 
 @dataclass(frozen=True)
@@ -77,8 +88,9 @@ class ScanLimits:
 @dataclass(frozen=True)
 class DetectionResult:
     column: str
-    detected_as: str
+    detected_type: str
     display_name: str
+    policy_categories: list[str]
     confidence_score: float
     signals: list[str]
 
@@ -198,7 +210,7 @@ def _candidate_detection(
     column_name: str,
     values: list[str],
     ml_detected: bool,
-    detected_as: str,
+    detected_type: str,
     display_name: str,
     keyword_signal: tuple[str, tuple[str, ...], float] | None = None,
     pattern_signal: tuple[str, bool, float] | None = None,
@@ -229,8 +241,9 @@ def _candidate_detection(
 
     return DetectionResult(
         column=column_name,
-        detected_as=detected_as,
+        detected_type=detected_type,
         display_name=display_name,
+        policy_categories=get_policy_categories(detected_type),
         confidence_score=round(min(score, 0.99), 2),
         signals=signals,
     )
@@ -242,8 +255,8 @@ def _build_detection_result(*, column_name: str, values: list[str], ml_detected:
             column_name=column_name,
             values=values,
             ml_detected=ml_detected,
-            detected_as="PII_EMAIL",
-            display_name="Email Address",
+            detected_type=PII_EMAIL,
+            display_name=get_display_name(PII_EMAIL),
             keyword_signal=("column_name_keyword_email", ("email", "e mail"), 0.24),
             pattern_signal=("pattern_match_email_regex", _contains_email_pattern(values), 0.44),
             format_signal=("value_format_match_email", _contains_email_pattern(values), 0.12),
@@ -252,8 +265,8 @@ def _build_detection_result(*, column_name: str, values: list[str], ml_detected:
             column_name=column_name,
             values=values,
             ml_detected=ml_detected,
-            detected_as="PII_PHONE",
-            display_name="Phone Number",
+            detected_type=PII_PHONE,
+            display_name=get_display_name(PII_PHONE),
             keyword_signal=("column_name_keyword_phone", ("phone", "telephone", "mobile", "cell", "tel"), 0.24),
             pattern_signal=("pattern_match_phone_regex", _contains_phone_pattern(values), 0.42),
             format_signal=("value_format_match_phone", _contains_phone_pattern(values), 0.14),
@@ -262,8 +275,8 @@ def _build_detection_result(*, column_name: str, values: list[str], ml_detected:
             column_name=column_name,
             values=values,
             ml_detected=ml_detected,
-            detected_as="PII_SSN",
-            display_name="Social Security Number",
+            detected_type=PII_SSN,
+            display_name=get_display_name(PII_SSN),
             keyword_signal=("column_name_keyword_ssn", ("ssn", "social security"), 0.24),
             pattern_signal=("pattern_match_ssn_regex", _contains_ssn_pattern(values), 0.5),
         ),
@@ -271,8 +284,8 @@ def _build_detection_result(*, column_name: str, values: list[str], ml_detected:
             column_name=column_name,
             values=values,
             ml_detected=ml_detected,
-            detected_as="PII_IP_ADDRESS",
-            display_name="IP Address",
+            detected_type=PII_IP_ADDRESS,
+            display_name=get_display_name(PII_IP_ADDRESS),
             keyword_signal=("column_name_keyword_ip", ("ip", "ip address", "ipv4", "ipv6"), 0.24),
             pattern_signal=("pattern_match_ip_regex", _contains_ip_pattern(values), 0.5),
         ),
@@ -280,8 +293,8 @@ def _build_detection_result(*, column_name: str, values: list[str], ml_detected:
             column_name=column_name,
             values=values,
             ml_detected=ml_detected,
-            detected_as="PII_ADDRESS",
-            display_name="Location",
+            detected_type=PII_ADDRESS,
+            display_name=get_display_name(PII_ADDRESS),
             keyword_signal=("column_name_keyword_address", ("address", "street", "city", "zip", "postal"), 0.22),
             format_signal=("value_format_match_address", _contains_street_suffix(values), 0.26),
             context_signal=("context_match_address_geography", _contains_city_name(values) or _contains_zip_code_pattern(values), 0.16),
@@ -290,8 +303,8 @@ def _build_detection_result(*, column_name: str, values: list[str], ml_detected:
             column_name=column_name,
             values=values,
             ml_detected=ml_detected,
-            detected_as="PII_NAME",
-            display_name="Full Name",
+            detected_type=PII_NAME,
+            display_name=get_display_name(PII_NAME),
             keyword_signal=("column_name_keyword_name", ("name", "first name", "last name", "full name"), 0.22),
             format_signal=("value_format_match_name", _contains_known_name(values), 0.24),
         ),
@@ -299,8 +312,8 @@ def _build_detection_result(*, column_name: str, values: list[str], ml_detected:
             column_name=column_name,
             values=values,
             ml_detected=ml_detected,
-            detected_as="PII_DATE_OF_BIRTH",
-            display_name="Date of Birth / Date",
+            detected_type=PII_DATE_OF_BIRTH,
+            display_name=get_display_name(PII_DATE_OF_BIRTH),
             keyword_signal=("column_name_keyword_dob", ("dob", "birth", "date of birth"), 0.22),
             pattern_signal=("pattern_match_dob_regex", _contains_dob_pattern(values), 0.36),
             context_signal=("context_match_age_sensitive_column", _column_has_keyword(column_name, "dob", "birth"), 0.12),
@@ -313,8 +326,9 @@ def _build_detection_result(*, column_name: str, values: list[str], ml_detected:
     if ml_detected:
         return DetectionResult(
             column=column_name,
-            detected_as=GENERIC_DETECTION_TYPE,
-            display_name=GENERIC_DETECTION_LABEL,
+            detected_type=PII_SENSITIVE_DATA,
+            display_name=get_display_name(PII_SENSITIVE_DATA),
+            policy_categories=get_policy_categories(PII_SENSITIVE_DATA),
             confidence_score=0.18,
             signals=["ml_model_prediction"],
         )
@@ -326,8 +340,12 @@ def build_scan_result_metadata(
     redacted_type_counts: dict[str, int],
     detection_results: list[dict[str, object]],
 ) -> dict[str, object]:
+    normalized_counts: dict[str, int] = {}
+    for label, count in redacted_type_counts.items():
+        taxonomy_code = map_legacy_label_to_taxonomy(label)
+        normalized_counts[taxonomy_code] = normalized_counts.get(taxonomy_code, 0) + int(count)
     return {
-        "counts": dict(redacted_type_counts),
+        "counts": normalized_counts,
         "detections": list(detection_results),
     }
 
@@ -346,11 +364,11 @@ def parse_scan_result_metadata(raw_value: str | None) -> tuple[dict[str, int], l
     counts: dict[str, int] = {}
     if isinstance(raw_counts, dict):
         for key, value in raw_counts.items():
-            label = str(key).strip()
-            if not label:
+            taxonomy_code = map_legacy_label_to_taxonomy(key)
+            if not taxonomy_code:
                 continue
             try:
-                counts[label] = int(value)
+                counts[taxonomy_code] = counts.get(taxonomy_code, 0) + int(value)
             except (TypeError, ValueError):
                 continue
 
@@ -361,20 +379,25 @@ def parse_scan_result_metadata(raw_value: str | None) -> tuple[dict[str, int], l
             if not isinstance(item, dict):
                 continue
             column = str(item.get("column", "")).strip()
-            detected_as = str(item.get("detected_as", "")).strip()
-            display_name = str(item.get("display_name", "")).strip() or GENERIC_DETECTION_LABEL
+            detected_type = str(item.get("detected_type") or item.get("detected_as") or "").strip()
+            display_name = str(item.get("display_name", "")).strip() or get_display_name(detected_type)
+            policy_categories = item.get("policy_categories", get_policy_categories(detected_type))
             signals = item.get("signals", [])
-            if not column or not detected_as or not isinstance(signals, list):
+            if not column or not detected_type or not isinstance(signals, list):
                 continue
             try:
                 confidence_score = round(float(item.get("confidence_score", 0.0)), 2)
             except (TypeError, ValueError):
                 continue
+            if not isinstance(policy_categories, list):
+                policy_categories = get_policy_categories(detected_type)
             detections.append(
                 {
                     "column": column,
-                    "detected_as": detected_as,
+                    "detected_type": detected_type,
+                    "detected_as": detected_type,
                     "display_name": display_name,
+                    "policy_categories": [str(policy) for policy in policy_categories if str(policy).strip()],
                     "confidence_score": max(0.0, min(confidence_score, 1.0)),
                     "signals": [str(signal) for signal in signals if str(signal).strip()],
                 }

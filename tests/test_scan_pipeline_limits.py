@@ -20,9 +20,9 @@ class _FakeModel:
 
 
 def _fake_redactor(series, column_name="", aggressive=False):
-    redacted = series.astype(str).map(lambda value: "[REDACTED]" if value else value)
+    redacted = series.astype(str).map(lambda value: "[REDACTED_PII_EMAIL]" if value else value)
     count = int(series.notna().sum())
-    return redacted, count, len(series), 1.0 if len(series) else 0.0, {"Email Address": count}
+    return redacted, count, len(series), 1.0 if len(series) else 0.0, {"PII_EMAIL": count}
 
 
 def _write_csv(path: Path, rows: int) -> None:
@@ -65,7 +65,7 @@ def test_chunked_scan_pipeline_redacts_csv_without_materializing_full_dataset(mo
         assert result.pii_columns == ["email"]
         assert result.redacted_count == 4
         assert result.total_values == 4
-        assert redacted_frame["email"].tolist() == ["[REDACTED]"] * 4
+        assert redacted_frame["email"].tolist() == ["[REDACTED_PII_EMAIL]"] * 4
         assert redacted_frame["notes"].tolist() == [f"note-{index}" for index in range(4)]
     finally:
         shutil.rmtree(base, ignore_errors=True)

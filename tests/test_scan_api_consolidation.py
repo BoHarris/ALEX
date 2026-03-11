@@ -19,6 +19,7 @@ from dependencies.tier_guard import get_current_user_context
 from routers import scans as scans_router
 from services.scan_service import ScanPipelineResult
 from utils.constants import SUPPORTED_EXTENSIONS_SORTED
+from utils.pii_taxonomy import GDPR_PERSONAL_DATA, HIPAA_IDENTIFIER, PII_EMAIL
 
 
 def _make_local_test_dir() -> Path:
@@ -87,12 +88,13 @@ def test_post_scans_creates_scan_and_legacy_predict_route_is_not_mounted(monkeyp
             risk_score=40,
             redacted_count=2,
             total_values=4,
-            redacted_type_counts={"Email Address": 2},
+            redacted_type_counts={PII_EMAIL: 2},
             detection_results=[
                 {
                     "column": "email",
-                    "detected_as": "PII_EMAIL",
+                    "detected_type": PII_EMAIL,
                     "display_name": "Email Address",
+                    "policy_categories": [GDPR_PERSONAL_DATA, HIPAA_IDENTIFIER],
                     "confidence_score": 0.86,
                     "signals": ["pattern_match_email_regex", "column_name_keyword_email", "ml_model_prediction"],
                 }
@@ -137,7 +139,7 @@ def test_get_scan_returns_scan_metadata():
         file_type="csv",
         risk_score=25,
         pii_types_found="email",
-        redacted_type_counts='{"counts": {"Email Address": 2}, "detections": [{"column": "email", "detected_as": "PII_EMAIL", "display_name": "Email Address", "confidence_score": 0.86, "signals": ["pattern_match_email_regex", "column_name_keyword_email", "ml_model_prediction"]}]}',
+        redacted_type_counts='{"counts": {"PII_EMAIL": 2}, "detections": [{"column": "email", "detected_type": "PII_EMAIL", "display_name": "Email Address", "policy_categories": ["GDPR_PERSONAL_DATA", "HIPAA_IDENTIFIER"], "confidence_score": 0.86, "signals": ["pattern_match_email_regex", "column_name_keyword_email", "ml_model_prediction"]}]}',
         total_pii_found=2,
         redacted_file_path="redacted/report.csv",
         status="active",
@@ -157,7 +159,8 @@ def test_get_scan_returns_scan_metadata():
         assert payload["filename"] == "report.csv"
         assert payload["redacted_file"] == f"/scans/{scan.id}/download"
         assert payload["report_file"] == f"/scans/{scan.id}/report"
-        assert payload["detection_results"][0]["detected_as"] == "PII_EMAIL"
+        assert payload["redacted_type_counts"][PII_EMAIL] == 2
+        assert payload["detection_results"][0]["detected_type"] == PII_EMAIL
     finally:
         session.close()
 

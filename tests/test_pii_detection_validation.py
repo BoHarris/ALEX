@@ -8,6 +8,8 @@ import pandas as pd
 from database.models.scan_results import ScanResult
 from services import scan_service
 from services.audit_report_service import generate_audit_report_html
+from utils import redaction
+from utils.pii_taxonomy import GDPR_PERSONAL_DATA, PII_EMAIL, PII_PHONE
 
 
 class _HeuristicModel:
@@ -44,7 +46,8 @@ def test_email_detection_includes_explainable_signals():
     pii_columns, detections = _detect(frame)
 
     assert pii_columns == ["email"]
-    assert detections[0]["detected_as"] == "PII_EMAIL"
+    assert detections[0]["detected_type"] == PII_EMAIL
+    assert detections[0]["policy_categories"] == [GDPR_PERSONAL_DATA, "HIPAA_IDENTIFIER"]
     assert detections[0]["confidence_score"] == 0.98
     assert "pattern_match_email_regex" in detections[0]["signals"]
     assert "column_name_keyword_email" in detections[0]["signals"]
@@ -58,7 +61,8 @@ def test_phone_detection_is_identified_with_signal_based_score():
     pii_columns, detections = _detect(frame)
 
     assert pii_columns == ["phone_number"]
-    assert detections[0]["detected_as"] == "PII_PHONE"
+    assert detections[0]["detected_type"] == PII_PHONE
+    assert GDPR_PERSONAL_DATA in detections[0]["policy_categories"]
     assert detections[0]["confidence_score"] == 0.98
     assert "pattern_match_phone_regex" in detections[0]["signals"]
     assert "column_name_keyword_phone" in detections[0]["signals"]
@@ -94,8 +98,9 @@ def test_report_includes_detection_reasoning_section():
     detection_results = [
         {
             "column": "email",
-            "detected_as": "PII_EMAIL",
+            "detected_type": PII_EMAIL,
             "display_name": "Email Address",
+            "policy_categories": [GDPR_PERSONAL_DATA, "HIPAA_IDENTIFIER"],
             "confidence_score": 0.98,
             "signals": [
                 "pattern_match_email_regex",
@@ -112,7 +117,7 @@ def test_report_includes_detection_reasoning_section():
         pii_types_found="email",
         redacted_type_counts=json.dumps(
             scan_service.build_scan_result_metadata(
-                redacted_type_counts={"Email Address": 2},
+                redacted_type_counts={PII_EMAIL: 2},
                 detection_results=detection_results,
             )
         ),
@@ -122,6 +127,35 @@ def test_report_includes_detection_reasoning_section():
     html = generate_audit_report_html(scan)
 
     assert "Detection Reasoning" in html
+    assert PII_EMAIL in html
+    assert "GDPR Personal Data" in html
     assert "Email Address" in html
     assert "0.98" in html
     assert "pattern_match_email_regex" in html
+
+
+def test_redactions_include_taxonomy_placeholder(monkeypatch):
+    class _FakeResult:
+        entity_type = "EMAIL_ADDRESS"
+
+    monkeypatch.setattr(redaction.analyzer, "analyze", lambda text, language="en": [_FakeResult()])
+    monkeypatch.setattr(
+        redaction.anonymizer,
+        "anonymize",
+        lambda text, analyzer_results, operators: type(
+            "_Result",
+            (),
+            {"text": operators["EMAIL_ADDRESS"].params["new_value"]},
+        )(),
+    )
+
+    series = pd.Series(["ada@example.com"])
+    redacted_series, redacted_count, total_values, _, type_counts = redaction.scan_and_redact_column_with_details(
+        series,
+        "email",
+    )
+
+    assert redacted_series.iloc[0] == "[REDACTED_PII_EMAIL]"
+    assert redacted_count == 1
+    assert total_values == 1
+    assert type_counts[PII_EMAIL] == 1
