@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from database.database import get_db
 from database.models.company import Company
 from database.models.employee import Employee
+from database.models.pending_registration import PendingRegistration
 from database.models.user import User
 from database.models.webauthn_challenge import WebAuthnChallenge
 from services.audit_service import record_audit_event
@@ -143,6 +144,26 @@ def _store_challenge(db: Session, user_id: int, challenge: str, challenge_type: 
     db.commit()
 
 
+def _cleanup_expired_pending_registrations(db: Session, limit: int = 200) -> int:
+    now_utc = datetime.now(timezone.utc)
+    expired_candidates = (
+        db.query(PendingRegistration)
+        .order_by(PendingRegistration.expires_at.asc())
+        .limit(limit)
+        .all()
+    )
+    deleted = 0
+    for record in expired_candidates:
+        expires_at = record.expires_at
+        now = now_utc.replace(tzinfo=None) if expires_at.tzinfo is None else now_utc
+        if expires_at <= now:
+            db.delete(record)
+            deleted += 1
+    if deleted:
+        db.commit()
+    return deleted
+
+
 def _cleanup_expired_challenges(db: Session, limit: int = 200) -> int:
     now_utc = datetime.now(timezone.utc)
     expired_candidates = (
@@ -194,6 +215,11 @@ def _delete_challenge(db: Session, user_id: int, challenge_type: str) -> None:
         WebAuthnChallenge.user_id == user_id,
         WebAuthnChallenge.challenge_type == challenge_type,
     ).delete()
+    db.commit()
+
+
+def _delete_pending_registration(db: Session, registration_id: int) -> None:
+    db.query(PendingRegistration).filter(PendingRegistration.id == registration_id).delete()
     db.commit()
 
 
@@ -271,11 +297,7 @@ def _resolve_company_membership(
                     error_code="validation_error",
                 ),
             )
-
-        company = Company(company_name=company_name_clean, is_active=True)
-        db.add(company)
-        db.flush()
-        return company.id, ROLE_ORG_ADMIN
+        return None, ROLE_ORG_ADMIN
 
     if company_name_clean:
         existing = db.query(Company).filter(Company.company_name == company_name_clean).first()
@@ -290,6 +312,96 @@ def _resolve_company_membership(
         return existing.id, ROLE_USER
 
     return None, ROLE_USER
+
+
+def _create_pending_registration(
+    *,
+    db: Session,
+    email: str,
+    first_name: str,
+    last_name: str,
+    company_name: str | None,
+    create_company: bool,
+    company_id: int | None,
+    role: str,
+    challenge: str,
+) -> PendingRegistration:
+    _cleanup_expired_pending_registrations(db)
+    db.query(PendingRegistration).filter(PendingRegistration.email == email).delete()
+    registration = PendingRegistration(
+        email=email,
+        first_name=first_name,
+        last_name=last_name,
+        company_name=company_name,
+        create_company=create_company,
+        company_id=company_id,
+        role=normalize_role(role),
+        webauthn_user_handle=_new_user_handle(),
+        challenge=challenge,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=CHALLENGE_TTL_MINUTES),
+    )
+    db.add(registration)
+    db.commit()
+    db.refresh(registration)
+    return registration
+
+
+def _get_valid_pending_registration(db: Session, registration_id: int) -> PendingRegistration | None:
+    _cleanup_expired_pending_registrations(db)
+    registration = db.query(PendingRegistration).filter(PendingRegistration.id == registration_id).first()
+    if not registration:
+        return None
+    expires_at = registration.expires_at
+    now_utc = datetime.now(timezone.utc)
+    now = now_utc.replace(tzinfo=None) if expires_at.tzinfo is None else now_utc
+    if expires_at <= now:
+        db.delete(registration)
+        db.commit()
+        return None
+    return registration
+
+
+def _create_user_from_pending_registration(
+    *,
+    db: Session,
+    registration: PendingRegistration,
+):
+    existing_user = db.query(User).filter(User.email == registration.email).first()
+    if existing_user:
+        raise HTTPException(
+            status_code=409,
+            detail=error_payload(
+                detail="Account already exists",
+                error_code="validation_error",
+            ),
+        )
+    company_id = registration.company_id
+    if registration.create_company:
+        existing = db.query(Company).filter(Company.company_name == registration.company_name).first()
+        if existing:
+            raise HTTPException(
+                status_code=409,
+                detail=error_payload(
+                    detail="Company already exists",
+                    error_code="validation_error",
+                ),
+            )
+        company = Company(company_name=registration.company_name, is_active=True)
+        db.add(company)
+        db.flush()
+        company_id = company.id
+
+    user = User(
+        email=registration.email,
+        first_name=registration.first_name,
+        last_name=registration.last_name,
+        company_id=company_id,
+        role=normalize_role(registration.role),
+        webauthn_user_handle=registration.webauthn_user_handle,
+    )
+    db.add(user)
+    db.flush()
+    return user
 
 
 def _load_employee_by_email(db: Session, email: str) -> Employee:
@@ -317,14 +429,14 @@ def webauthn_register_options(
 
     user = db.query(User).filter(User.email == safe_email).first()
 
-    if user and user.webauthn_credential_id:
+    if user:
         record_audit_event(
             db,
             company_id=user.company_id if user else None,
             user_id=user.id if user else None,
             event_type="passkey_registration_denied",
             event_category="authentication",
-            description="Passkey registration was denied because an enrollment already exists.",
+            description="Passkey registration was denied because an account already exists.",
             target_type="user",
             target_id=str(user.id) if user else None,
             request_context=extract_request_security_context(request),
@@ -334,63 +446,39 @@ def webauthn_register_options(
         raise HTTPException(
             status_code=400,
             detail=error_payload(
-                detail="Passkey already enrolled for this account",
+                detail="Account already exists",
                 error_code="validation_error",
             ),
         )
 
     company_id: int | None
     role: str
-    if (
-        user
-        and should_create_company
-        and requested_company_name
-        and user.company_id is not None
-    ):
-        current_company = db.query(Company).filter(Company.id == user.company_id).first()
-        if current_company and current_company.company_name == requested_company_name:
-            company_id = current_company.id
-            role = "admin"
-        else:
-            company_id, role = _resolve_company_membership(
-                db=db,
-                create_company=should_create_company,
-                company_name=requested_company_name,
-            )
-    else:
-        company_id, role = _resolve_company_membership(
-            db=db,
-            create_company=should_create_company,
-            company_name=requested_company_name,
-        )
+    company_id, role = _resolve_company_membership(
+        db=db,
+        create_company=should_create_company,
+        company_name=requested_company_name,
+    )
 
-    if user:
-        user.first_name = safe_first_name
-        user.last_name = safe_last_name
-        user.company_id = company_id
-        user.role = normalize_role(role)
-        if not user.webauthn_user_handle:
-            user.webauthn_user_handle = _new_user_handle()
-    else:
-        user = User(
-            email=safe_email,
-            first_name=safe_first_name,
-            last_name=safe_last_name,
-            company_id=company_id,
-            role=normalize_role(role),
-            webauthn_user_handle=_new_user_handle(),
-        )
-        db.add(user)
-
-    db.commit()
-    db.refresh(user)
+    challenge_b64 = bytes_to_base64url(secrets.token_bytes(32))
+    registration = _create_pending_registration(
+        db=db,
+        email=safe_email,
+        first_name=safe_first_name,
+        last_name=safe_last_name,
+        company_name=requested_company_name,
+        create_company=should_create_company,
+        company_id=company_id,
+        role=role,
+        challenge=challenge_b64,
+    )
 
     options = generate_registration_options(
         rp_id=RP_ID,
         rp_name=RP_NAME,
-        user_id=base64url_to_bytes(user.webauthn_user_handle),
-        user_name=user.email,
-        user_display_name=f"{user.first_name} {user.last_name}",
+        challenge=base64url_to_bytes(challenge_b64),
+        user_id=base64url_to_bytes(registration.webauthn_user_handle),
+        user_name=registration.email,
+        user_display_name=f"{registration.first_name} {registration.last_name}",
         attestation=AttestationConveyancePreference.NONE,
         authenticator_selection=AuthenticatorSelectionCriteria(
             resident_key=ResidentKeyRequirement.PREFERRED,
@@ -398,22 +486,20 @@ def webauthn_register_options(
         ),
     )
 
-    challenge_b64 = bytes_to_base64url(options.challenge)
-    _store_challenge(db, user.id, challenge_b64, "register")
     record_audit_event(
         db,
-        company_id=user.company_id,
-        user_id=user.id,
+        company_id=registration.company_id,
+        user_id=None,
         event_type="passkey_registration_started",
         event_category="authentication",
         description="Passkey registration challenge issued.",
-        target_type="user",
-        target_id=str(user.id),
+        target_type="pending_registration",
+        target_id=str(registration.id),
         request_context=extract_request_security_context(request),
         event_metadata={"create_company": should_create_company},
     )
     db.commit()
-    return {"user_id": user.id, "options": _serialize_webauthn_value(options)}
+    return {"user_id": registration.id, "options": _serialize_webauthn_value(options)}
 
 
 @router.post("/employee/webauthn/register/options")
@@ -539,23 +625,13 @@ def webauthn_register_verify(
     db: Session = Depends(get_db),
 ):
     _enforce_auth_rate_limit(db=db, request=request, identifier=str(payload.user_id))
-    request_user_id = payload.user_id
+    registration_id = payload.user_id
     request_credential = payload.credential
 
-    _cleanup_expired_challenges(db)
+    _cleanup_expired_pending_registrations(db)
 
-    user = db.query(User).filter(User.id == request_user_id).first()
-    if not user:
-        raise HTTPException(
-            status_code=404,
-            detail=error_payload(
-                detail="User not found",
-                error_code="validation_error",
-            ),
-        )
-
-    expected_challenge_b64 = _get_valid_challenge(db, user.id, "register")
-    if not expected_challenge_b64:
+    registration = _get_valid_pending_registration(db, registration_id)
+    if not registration:
         raise HTTPException(
             status_code=400,
             detail=error_payload(
@@ -567,31 +643,33 @@ def webauthn_register_verify(
     try:
         verification = verify_registration_response(
             credential=request_credential,
-            expected_challenge=base64url_to_bytes(expected_challenge_b64),
+            expected_challenge=base64url_to_bytes(registration.challenge),
             expected_origin=ORIGIN,
             expected_rp_id=RP_ID,
             require_user_verification=True,
         )
     except Exception:
+        request_context = extract_request_security_context(request)
         register_failed_login(
             db,
-            email=user.email,
-            organization_id=user.company_id,
-            user_id=user.id,
-            context=extract_request_security_context(request),
+            email=registration.email,
+            organization_id=registration.company_id,
+            user_id=None,
+            context=request_context,
         )
         record_audit_event(
             db,
-            company_id=user.company_id,
-            user_id=user.id,
+            company_id=registration.company_id,
+            user_id=None,
             event_type="passkey_registration_failed",
             event_category="authentication",
             description="Registration verification failed.",
-            target_type="user",
-            target_id=str(user.id),
-            request_context=extract_request_security_context(request),
+            target_type="pending_registration",
+            target_id=str(registration.id),
+            request_context=request_context,
         )
         db.commit()
+        _delete_pending_registration(db, registration.id)
         raise HTTPException(
             status_code=400,
             detail=error_payload(
@@ -600,14 +678,19 @@ def webauthn_register_verify(
             ),
         )
 
+    user = _create_user_from_pending_registration(
+        db=db,
+        registration=registration,
+    )
     user.webauthn_credential_id = bytes_to_base64url(verification.credential_id)
     user.webauthn_public_key = bytes_to_base64url(verification.credential_public_key)
     user.webauthn_sign_count = verification.sign_count or 0
 
     db.add(user)
     db.commit()
+    db.refresh(user)
 
-    _delete_challenge(db, user.id, "register")
+    _delete_pending_registration(db, registration.id)
     record_audit_event(
         db,
         company_id=user.company_id,

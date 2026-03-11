@@ -19,6 +19,7 @@ from database.models.compliance_test_run import ComplianceTestRun
 from database.models.code_review import CodeReview
 from database.models.company_settings import CompanySettings
 from database.models.employee import Employee
+from database.models.pending_registration import PendingRegistration
 from database.models.refresh_session import RefreshSession
 from database.models.grc_incident import GRCIncident
 from database.models.hr_control import HRControl
@@ -46,6 +47,7 @@ REQUIRED_DIRS = (
 )
 REQUIRED_SCHEMA = {
     "users": {"id", "email", "role", "company_id", "refresh_version"},
+    "pending_registrations": {"id", "email", "webauthn_user_handle", "challenge", "expires_at"},
     "refresh_sessions": {"id", "user_id", "refresh_jti_hash", "revoked", "created_at"},
     "scan_results": {"id", "user_id", "company_id", "filename", "redacted_type_counts"},
     "webauthn_challenges": {"id", "user_id", "challenge", "challenge_type", "expires_at"},
@@ -197,6 +199,7 @@ def _bootstrap_feature_tables() -> None:
             SecurityState.__table__,
             ScanQuotaCounter.__table__,
             SecurityIncident.__table__,
+            PendingRegistration.__table__,
             RefreshSession.__table__,
             Employee.__table__,
             ComplianceRecord.__table__,
@@ -218,7 +221,7 @@ def _bootstrap_feature_tables() -> None:
         ],
     )
     logger.info(
-        "Startup validation: feature tables ensured (company_settings, audit_events, audit_logs, security_states, scan_quota_counters, security_incidents, refresh_sessions)."
+        "Startup validation: feature tables ensured (company_settings, audit_events, audit_logs, security_states, scan_quota_counters, security_incidents, pending_registrations, refresh_sessions)."
     )
 
 

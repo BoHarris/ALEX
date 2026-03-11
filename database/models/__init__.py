@@ -2,6 +2,7 @@ from .user import User
 from .company import Company
 from .scan_results import ScanResult
 from .webauthn_challenge import WebAuthnChallenge
+from .pending_registration import PendingRegistration
 from .company_settings import CompanySettings
 from .audit_event import AuditEvent
 from .audit_log import AuditLog
