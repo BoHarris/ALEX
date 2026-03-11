@@ -30,7 +30,7 @@ const AnimatedLandingHeader = () => {
   return (
     <div className="text-center mt-16">
       <motion.h1
-        className="text-4xl sm:text-5xl font-bold text-white"
+        className="text-4xl sm:text-5xl font-bold text-app"
         variants={containerVariants}
         initial="hidden"
         animate="visible"
@@ -47,7 +47,7 @@ const AnimatedLandingHeader = () => {
       </motion.h1>
 
       <motion.p
-        className="text-gray-400 mt-4 text-lg"
+        className="text-app-secondary mt-4 text-lg"
         variants={subtitleVariants}
         initial="hidden"
         animate="visible"

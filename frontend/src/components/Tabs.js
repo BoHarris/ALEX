@@ -1,15 +1,17 @@
-import { createContext, useContext, useMemo, useState } from "react";
+import { Children, createContext, useContext, useMemo, useState } from "react";
 
 const TabsContext = createContext(null);
 
-export function Tabs({ children, defaultvalue }) {
-  const [active, setActive] = useState(defaultvalue);
-  const ctx = useMemo(() => ({ active, setActive }), [active]);
+export function Tabs({ children, defaultvalue, value, onValueChange }) {
+  const [internalActive, setInternalActive] = useState(defaultvalue);
+  const active = value ?? internalActive;
+  const setActive = onValueChange ?? setInternalActive;
+  const ctx = useMemo(() => ({ active, setActive }), [active, setActive]);
   return <TabsContext.Provider value={ctx}>{children}</TabsContext.Provider>;
 }
 
 export function TabList({ children }) {
-  return <div className="flex border-b">{children}</div>;
+  return <div className="flex border-b border-app">{children}</div>;
 }
 
 export function Tab({ value, children }) {
@@ -20,8 +22,8 @@ export function Tab({ value, children }) {
       onClick={() => setActive(value)}
       className={
         isActive
-          ? "px-4 py-2 -mb-px border-b-2 border-blue-500 text-blue-500 font-medium"
-          : "px-4 py-2 text-gray-500 hover:text-gray-700"
+          ? "px-4 py-2 -mb-px border-b-2 border-cyan-500 text-cyan-400 font-medium"
+          : "px-4 py-2 text-app-secondary hover:text-app"
       }
     >
       {children}
@@ -31,9 +33,10 @@ export function Tab({ value, children }) {
 
 export function TabPanels({ children }) {
   const { active } = useContext(TabsContext);
+  const panels = Children.toArray(children);
   return (
     <>
-      {children.map((panel) => (panel.props.value === active ? panel : null))}
+      {panels.map((panel) => (panel.props.value === active ? panel : null))}
     </>
   );
 }

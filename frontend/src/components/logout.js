@@ -1,10 +1,12 @@
 import React from "react";
 import { Button } from "../components/button";
-import { useCurrentUser } from "../hooks/useLoadUser";
+import { invalidateCurrentUserCache } from "../hooks/useLoadUser";
 import { apiUrl } from "../utils/api";
+import { readResponseData } from "../utils/http";
+import { clearAccessToken, getAccessToken } from "../utils/tokenStore";
 
 function LogoutButton() {
-  const { user } = useCurrentUser();
+  const hasToken = Boolean(getAccessToken());
 
   const handleLogout = async () => {
     try {
@@ -12,10 +14,9 @@ function LogoutButton() {
         method: "POST",
         credentials: "include",
       });
-      const data = await response.json();
-      console.log(data.message);
-      // Clear client-side tokens
-      localStorage.removeItem("access_token");
+      await readResponseData(response);
+      clearAccessToken();
+      invalidateCurrentUserCache();
       //redirect to /login
       window.location.href = "/login";
     } catch (err) {
@@ -23,7 +24,7 @@ function LogoutButton() {
     }
   };
 
-  if (!user) {
+  if (!hasToken) {
     return null;
   }
   return (

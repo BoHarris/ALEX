@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { Button } from "../components/button";
 import TextField from "../components/text_input";
 import { apiUrl } from "../utils/api";
+import { getResponseMessage, readResponseData } from "../utils/http";
 
 function base64UrlToUint8Array(base64Url) {
   const padding = "=".repeat((4 - (base64Url.length % 4)) % 4);
@@ -56,7 +57,8 @@ function Register() {
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const handleRegister = async () => {
+  const handleRegister = async (event) => {
+    event.preventDefault();
     setLoading(true);
     setMessage("");
 
@@ -80,9 +82,14 @@ function Register() {
           }),
         }
       );
-      const optionsData = await optionsRes.json();
+      const { data: optionsData, text: optionsText } = await readResponseData(optionsRes);
       if (!optionsRes.ok) {
-        throw new Error(optionsData.detail || "Failed to begin passkey registration");
+        throw new Error(
+          getResponseMessage(optionsData, "Failed to begin passkey registration", optionsText),
+        );
+      }
+      if (!optionsData) {
+        throw new Error("Unexpected response from server");
       }
 
       const userId = optionsData.user_id;
@@ -99,25 +106,26 @@ function Register() {
       }
 
       const verifyRes = await fetch(
-        apiUrl(
-          `/auth/webauthn/register/verify?user_id=${encodeURIComponent(userId)}`
-        ),
+        apiUrl("/auth/webauthn/register/verify"),
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "include",
-          body: JSON.stringify(serializeAttestation(credential)),
+          body: JSON.stringify({
+            user_id: userId,
+            credential: serializeAttestation(credential),
+          }),
         }
       );
-      const data = await verifyRes.json().catch(async () => {
-        const txt = await verifyRes.text();
-        throw new Error(txt || "Unexpected response from server");
-      });
+      const { data, text: verifyText } = await readResponseData(verifyRes);
+      if (!data && verifyRes.ok) {
+        throw new Error("Unexpected response from server");
+      }
 
       if (!verifyRes.ok) {
         const msg = Array.isArray(data.detail)
           ? data.detail.map((d) => d.msg).join(", ")
-          : data.detail || data.message || data.error || "Passkey registration failed";
+          : getResponseMessage(data, "Passkey registration failed", verifyText);
 
         throw new Error(msg);
       }
@@ -132,54 +140,66 @@ function Register() {
 
   return (
     <div className="min-h-[70vh] flex items-center justify-center px-4">
-      <div className="w-full max-w-md rounded-xl border border-zinc-700 bg-zinc-900/70 p-6 flex flex-col gap-4">
-        <p className="text-sm text-zinc-300">
+      <div className="surface-card flex w-full max-w-md flex-col gap-4 p-6">
+        <h1 className="text-2xl font-semibold text-app">Create your account</h1>
+        <p className="text-sm text-app-secondary">
           ALEX uses passkeys instead of passwords for secure authentication.
           You will be asked to create a passkey on your device.
         </p>
 
-        <TextField
-          id="firstName"
-          label="First Name"
-          type="text"
-          value={first_name}
-          placeholder="First Name"
-          onChange={(e) => setFirstName(e.target.value)}
-        />
-        <TextField
-          id="lastName"
-          label="Last Name"
-          type="text"
-          value={last_name}
-          placeholder="Last Name"
-          onChange={(e) => setLastName(e.target.value)}
-        />
-        <TextField
-          id="email"
-          label="Email"
-          type="email"
-          value={email}
-          placeholder="you@example.com"
-          onChange={(e) => setEmail(e.target.value)}
-        />
-        <TextField
-          id="companyName"
-          label="Company Name (Optional)"
-          type="text"
-          value={company_name}
-          placeholder="Company Name (Optional)"
-          onChange={(e) => setCompanyName(e.target.value)}
-        />
+        <form className="flex flex-col gap-4" onSubmit={handleRegister} aria-busy={loading}>
+          <TextField
+            id="firstName"
+            label="First Name"
+            type="text"
+            value={first_name}
+            placeholder="First Name"
+            autoComplete="given-name"
+            required
+            onChange={(e) => setFirstName(e.target.value)}
+          />
+          <TextField
+            id="lastName"
+            label="Last Name"
+            type="text"
+            value={last_name}
+            placeholder="Last Name"
+            autoComplete="family-name"
+            required
+            onChange={(e) => setLastName(e.target.value)}
+          />
+          <TextField
+            id="email"
+            label="Email"
+            type="email"
+            value={email}
+            placeholder="you@example.com"
+            autoComplete="email"
+            required
+            onChange={(e) => setEmail(e.target.value)}
+          />
+          <TextField
+            id="companyName"
+            label="Company Name (Optional)"
+            type="text"
+            value={company_name}
+            placeholder="Company Name (Optional)"
+            autoComplete="organization"
+            onChange={(e) => setCompanyName(e.target.value)}
+          />
 
-        <Button onClick={handleRegister} disabled={loading}>
-          {loading ? "Registering..." : "Create Account with Passkey"}
-        </Button>
-        <p className="text-xs text-zinc-400 text-center">
-          No passwords. No tracking. Authentication stays on your device.
-        </p>
+          <Button type="submit" disabled={loading}>
+            {loading ? "Registering..." : "Create Account with Passkey"}
+          </Button>
+          <p className="text-center text-xs text-app-muted">
+            No passwords. No tracking. Authentication stays on your device.
+          </p>
+        </form>
 
         {message && (
           <div
+            role="status"
+            aria-live="polite"
             className={`text-sm text-center ${
               message.toLowerCase().includes("success")
                 ? "text-green-400"

@@ -13,9 +13,13 @@ class ScanResult(Base):
     file_type = Column(String, nullable=False)
     risk_score = Column(Integer, nullable=False)
     pii_types_found = Column(String, nullable=True)
+    redacted_type_counts = Column(String, nullable=True)
     total_pii_found = Column(Integer, nullable=False)
     redacted_file_path = Column(String, nullable=True)
     scanned_at = Column(DateTime, server_default=func.now(), nullable=False)
+    status = Column(String, nullable=False, default="active", index=True)
+    archived_at = Column(DateTime(timezone=True), nullable=True)
+    retention_expiration = Column(DateTime(timezone=True), nullable=True, index=True)
     
     user = relationship("User")
     company = relationship("Company")

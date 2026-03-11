@@ -1,4 +1,4 @@
-export function Input({ id, type = "text", placeholder, accept, onChange }) {
+export function Input({ id, type = "text", placeholder, accept, onChange, className = "", ...props }) {
   return (
     <input
       id={id}
@@ -6,7 +6,8 @@ export function Input({ id, type = "text", placeholder, accept, onChange }) {
       placeholder={placeholder}
       accept={accept}
       onChange={onChange}
-      className="border border-gray-300 rounded px-3 py-2 w-full"
+      className={`w-full rounded-xl border border-app bg-app px-3 py-2 text-app placeholder:text-app-muted focus-visible:outline-none ${className}`}
+      {...props}
     />
   );
 }

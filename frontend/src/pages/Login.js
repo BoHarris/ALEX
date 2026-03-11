@@ -3,7 +3,7 @@ import AnimatedHeading from "../components/animatedHeading";
 import LoginForm from "../components/LoginForm";
 function Login() {
   return (
-    <div className="py-12 bg-gray-900 text-white flex flex-col items-center justify-center">
+    <div className="page-shell flex flex-col items-center justify-center py-12">
       <AnimatedHeading />
       <LoginForm />
     </div>
