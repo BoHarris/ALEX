@@ -27,3 +27,4 @@ from .hr_control import HRControl
 from .risk_register_item import RiskRegisterItem
 from .compliance_test_case_result import ComplianceTestCaseResult
 from .code_review import CodeReview
+from .compliance_test_failure_task import ComplianceTestFailureTask

@@ -14,6 +14,7 @@ from database.models.compliance_attachment import ComplianceAttachment
 from database.models.compliance_comment import ComplianceComment
 from database.models.compliance_record import ComplianceRecord
 from database.models.compliance_test_case_result import ComplianceTestCaseResult
+from database.models.compliance_test_failure_task import ComplianceTestFailureTask
 from database.models.compliance_test_run import ComplianceTestRun
 from database.models.code_review import CodeReview
 from database.models.company import Company
@@ -48,6 +49,7 @@ def _session():
             Vendor.__table__,
             ComplianceTestRun.__table__,
             ComplianceTestCaseResult.__table__,
+            ComplianceTestFailureTask.__table__,
             CodeReview.__table__,
             TrainingModule.__table__,
             TrainingAssignment.__table__,
@@ -541,11 +543,99 @@ def test_test_dashboard_inventory_and_history_support_management_views():
     assert inventory["summary"]["flaky"] == 1
     assert len(inventory["tests"]) == 1
     assert inventory["tests"][0]["test_name"] == "detect_email"
-    assert detail["trend"] in {"unstable", "degrading"}
+    assert detail["trend"] in {"regressed", "failing"}
+    assert detail["quality_label"] in {"Regressed", "Failing"}
     assert detail["total_runs"] == 2
     assert detail["file_path"] == "tests/privacy_tests.py"
     assert len(history["history"]) == 2
     assert history["history"][0]["status"] in {"failed", "passed"}
+    assert detail["task"] is not None
+    assert detail["task"]["status"] == "open"
+
+
+def test_failed_test_result_creates_remediation_task_and_supports_assignment_updates():
+    session = _session()
+    _, _, employee = _seed_org(session)
+    teammate = compliance_router.create_employee(
+        compliance_router.EmployeeCreateRequest(
+            first_name="Nia",
+            last_name="Stone",
+            email="nia@example.com",
+            role="engineering_lead",
+            department="Engineering",
+            job_title="Engineer",
+        ),
+        current_employee=_employee_context(employee),
+        db=session,
+    )["employee"]
+
+    run = compliance_router.create_test_run(
+        compliance_router.TestRunCreateRequest(
+            category="integration tests",
+            suite_name="Integration validation",
+            status="running",
+            dataset_name="ci_pr_104",
+        ),
+        current_employee=_employee_context(employee),
+        db=session,
+    )
+
+    created = compliance_router.create_test_result(
+        run["id"],
+        compliance_router.TestResultCreateRequest(
+            test_name="test_login_api_flow",
+            file_path="tests/test_integration_suite.py",
+            dataset_name="ci_pr_104",
+            expected_result="200_OK",
+            actual_result="500_ERROR",
+            status="failed",
+            duration_ms=240,
+            error_message="Expected 200 but received 500.",
+        ),
+        current_employee=_employee_context(employee),
+        db=session,
+    )
+
+    assert session.query(ComplianceTestFailureTask).count() == 1
+
+    task_payload = compliance_router.get_test_case_task(
+        created["test_node_id"],
+        current_employee=_employee_context(employee),
+        db=session,
+    )["task"]
+    assert task_payload["title"].startswith("Investigate failing test")
+    assert task_payload["status"] == "open"
+
+    updated = compliance_router.patch_test_failure_task(
+        task_payload["id"],
+        compliance_router.TestFailureTaskUpdateRequest(
+            status="in_progress",
+            priority="high",
+            assignee_employee_id=teammate["id"],
+        ),
+        current_employee=_employee_context(employee),
+        db=session,
+    )["task"]
+    assert updated["status"] == "in_progress"
+    assert updated["priority"] == "high"
+    assert updated["assignee"]["email"] == "nia@example.com"
+
+    compliance_router.create_test_result(
+        run["id"],
+        compliance_router.TestResultCreateRequest(
+            test_name="test_login_api_flow",
+            file_path="tests/test_integration_suite.py",
+            dataset_name="ci_pr_104",
+            expected_result="200_OK",
+            actual_result="500_ERROR",
+            status="failed",
+            duration_ms=260,
+            error_message="Expected 200 but received 500.",
+        ),
+        current_employee=_employee_context(employee),
+        db=session,
+    )
+    assert session.query(ComplianceTestFailureTask).count() == 1
 
 
 def test_inventory_renders_same_file_tests_and_same_name_different_files_separately():
@@ -614,6 +704,54 @@ def test_inventory_renders_same_file_tests_and_same_name_different_files_separat
     assert "tests/privacy_tests.py::test_detect_phone" in test_node_ids
     assert "tests/security_tests.py::test_detect_email" in test_node_ids
     assert len(test_node_ids) == 3
+
+
+def test_test_dashboard_seeds_current_organization_when_no_runs_exist():
+    session = _session()
+    _, _, employee = _seed_org(session)
+
+    assert session.query(ComplianceTestRun).count() == 0
+
+    dashboard = compliance_router.get_test_dashboard(
+        current_employee=_employee_context(employee),
+        db=session,
+    )
+
+    assert dashboard["summary"]["total_tests"] > 0
+    assert session.query(ComplianceTestRun).filter(
+        ComplianceTestRun.organization_id == employee.company_id
+    ).count() > 0
+
+
+def test_test_dashboard_backfills_missing_case_results_for_existing_runs():
+    session = _session()
+    company, _, employee = _seed_org(session)
+
+    run = ComplianceTestRun(
+        organization_id=company.id,
+        category="privacy tests",
+        suite_name="privacy tests baseline",
+        dataset_name="seed_baseline",
+        status="passed",
+        total_tests=3,
+        passed_tests=2,
+        failed_tests=0,
+        skipped_tests=1,
+    )
+    session.add(run)
+    session.commit()
+
+    assert session.query(ComplianceTestCaseResult).count() == 0
+
+    dashboard = compliance_router.get_test_dashboard(
+        current_employee=_employee_context(employee),
+        db=session,
+    )
+
+    assert dashboard["summary"]["total_tests"] > 0
+    assert session.query(ComplianceTestCaseResult).filter(
+        ComplianceTestCaseResult.test_run_id == run.id
+    ).count() == 3
 
 
 def test_compliance_overview_returns_attention_data():

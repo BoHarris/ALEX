@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from database.models.compliance_test_case_result import ComplianceTestCaseResult
 from database.models.compliance_test_run import ComplianceTestRun
+from services.test_failure_task_service import upsert_failure_task_for_result
 from services.test_discovery_service import split_test_node_id
 
 
@@ -67,6 +68,8 @@ def record_test_result(
     duration_ms: int | None = None,
     output: str | None = None,
     error_message: str | None = None,
+    created_by_employee_id: int | None = None,
+    created_by_user_id: int | None = None,
 ) -> ComplianceTestCaseResult:
     derived_file_path, derived_test_name = split_test_node_id(test_node_id) if test_node_id else (None, test_name)
     result = ComplianceTestCaseResult(
@@ -85,7 +88,15 @@ def record_test_result(
     )
     db.add(result)
     db.flush()
-    recalculate_test_run_summary(db, test_run_id=test_run_id)
+    run = recalculate_test_run_summary(db, test_run_id=test_run_id)
+    if result.status == "failed":
+        upsert_failure_task_for_result(
+            db,
+            run=run,
+            result=result,
+            actor_employee_id=created_by_employee_id,
+            actor_user_id=created_by_user_id,
+        )
     return result
 
 
@@ -104,6 +115,8 @@ def track_test_execution(
     description: str | None = None,
     output: str | None = None,
     error_message: str | None = None,
+    created_by_employee_id: int | None = None,
+    created_by_user_id: int | None = None,
 ) -> RecordedTestResult:
     started_at = perf_counter()
     normalized_expected = (expected_result or "").strip().upper()
@@ -125,6 +138,8 @@ def track_test_execution(
         duration_ms=round((perf_counter() - started_at) * 1000),
         output=output,
         error_message=error_message,
+        created_by_employee_id=created_by_employee_id,
+        created_by_user_id=created_by_user_id,
     )
     return RecordedTestResult(result=result, duration_ms=result.duration_ms or 0)
 

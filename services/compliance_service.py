@@ -305,8 +305,6 @@ def ensure_training_docs(db: Session, organization_id: int, employee_id: int, us
 
 
 def ensure_test_runs(db: Session, organization_id: int) -> None:
-    if db.query(ComplianceTestRun).filter(ComplianceTestRun.organization_id == organization_id).count():
-        return
     tests_dir = Path("tests")
     test_files = list(tests_dir.glob("test_*.py")) if tests_dir.exists() else []
     categories = [
@@ -336,8 +334,10 @@ def ensure_test_runs(db: Session, organization_id: int) -> None:
             ("failed", "failed", "skipped"),
         ]),
     ]
-    for display_name, key, suite_suffix, status_windows in categories:
-        matching = [path for path in test_files if key in path.name.lower()]
+
+    def seed_cases_for_run(run: ComplianceTestRun, *, key: str, display_name: str, statuses: tuple[str, ...]) -> None:
+        if db.query(ComplianceTestCaseResult).filter(ComplianceTestCaseResult.test_run_id == run.id).count():
+            return
         seed_cases = [
             (
                 f"test_{key}_primary_path",
@@ -364,6 +364,44 @@ def ensure_test_runs(db: Session, organization_id: int) -> None:
                 None,
             ),
         ]
+        for (name, file_name, description, duration_ms, output, default_error), status in zip(seed_cases, statuses):
+            db.add(
+                ComplianceTestCaseResult(
+                    test_run_id=run.id,
+                    name=name,
+                    dataset_name=run.dataset_name or "seed_baseline",
+                    file_name=file_name,
+                    description=description,
+                    expected_result=None,
+                    actual_result=None,
+                    status=status,
+                    confidence_score=None,
+                    duration_ms=duration_ms,
+                    output=output,
+                    error_message=default_error if status == "failed" else None,
+                    last_run_at=run.run_at,
+                )
+            )
+
+    existing_runs = (
+        db.query(ComplianceTestRun)
+        .filter(ComplianceTestRun.organization_id == organization_id)
+        .order_by(ComplianceTestRun.run_at.asc(), ComplianceTestRun.id.asc())
+        .all()
+    )
+    if existing_runs:
+        existing_by_category: dict[str, list[ComplianceTestRun]] = {}
+        for run in existing_runs:
+            existing_by_category.setdefault(run.category, []).append(run)
+        for display_name, key, suite_suffix, status_windows in categories:
+            for history_index, run in enumerate(existing_by_category.get(display_name, [])):
+                statuses = status_windows[min(history_index, len(status_windows) - 1)]
+                seed_cases_for_run(run, key=key, display_name=display_name, statuses=statuses)
+        db.commit()
+        return
+
+    for display_name, key, suite_suffix, status_windows in categories:
+        matching = [path for path in test_files if key in path.name.lower()]
         for history_index, statuses in enumerate(status_windows):
             passed_tests = sum(1 for status in statuses if status == "passed")
             failed_tests = sum(1 for status in statuses if status == "failed")
@@ -386,24 +424,7 @@ def ensure_test_runs(db: Session, organization_id: int) -> None:
             )
             db.add(run)
             db.flush()
-            for (name, file_name, description, duration_ms, output, default_error), status in zip(seed_cases, statuses):
-                db.add(
-                    ComplianceTestCaseResult(
-                        test_run_id=run.id,
-                        name=name,
-                        dataset_name="seed_baseline",
-                        file_name=file_name,
-                        description=description,
-                        expected_result=None,
-                        actual_result=None,
-                        status=status,
-                        confidence_score=None,
-                        duration_ms=duration_ms,
-                        output=output,
-                        error_message=default_error if status == "failed" else None,
-                        last_run_at=run.run_at,
-                    )
-                )
+            seed_cases_for_run(run, key=key, display_name=display_name, statuses=statuses)
     db.commit()
 
 
