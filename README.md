@@ -77,6 +77,7 @@ At minimum, the environment should include packages used by the codebase such as
 - `fastapi`
 - `uvicorn`
 - `sqlalchemy`
+- `alembic`
 - `python-dotenv`
 - `webauthn`
 - `reportlab` or `weasyprint`
@@ -118,7 +119,17 @@ Before full startup:
 - keep `DejaVuSans.ttf` in the repository root
 - place or generate `models/xgboost_model.pkl`
 
-### 6. Start the backend
+### 6. Run database migrations
+
+Apply the versioned schema before starting the backend:
+
+```bash
+alembic upgrade head
+```
+
+If startup reports a schema version mismatch, migrate the database before retrying.
+
+### 7. Start the backend
 
 Either of these reflects the current app entrypoint:
 
@@ -134,7 +145,7 @@ uvicorn main:app --reload
 
 The backend runs on `http://127.0.0.1:8000` by default.
 
-### 7. Start the frontend
+### 8. Start the frontend
 
 ```bash
 cd frontend
@@ -149,12 +160,13 @@ On startup, ALEX validates:
 
 - environment configuration
 - database connectivity
+- current migration/schema revision
 - required schema state
 - writable runtime directories (`uploads`, `redacted`, `logs`)
 - required report/font assets
 - PDF report dependency availability
 
-This is intentional: startup should fail fast when the runtime is incomplete.
+This is intentional: startup should fail fast when the runtime is incomplete or the database has not been migrated.
 
 ## Useful Endpoints
 
@@ -199,6 +211,13 @@ Backend tests:
 
 ```bash
 python -m pytest tests
+```
+
+Database migrations:
+
+```bash
+alembic upgrade head
+alembic downgrade -1
 ```
 
 Frontend production build:

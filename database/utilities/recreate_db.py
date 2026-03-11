@@ -1,4 +1,5 @@
-from database.database import Base, engine
+import subprocess
+import sys
 
-Base.metadata.create_all(bind=engine)
-print("Tables created.")
+subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"], check=True)
+print("Database migrated to head revision.")

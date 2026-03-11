@@ -2,6 +2,7 @@ import importlib
 
 import pandas as pd
 import pytest
+from sqlalchemy import create_engine, text
 
 import database.database as database_module
 import services.scan_service as scan_service
@@ -23,15 +24,13 @@ def test_startup_validation_loads_model_successfully(monkeypatch):
     sentinel_model = object()
     monkeypatch.setattr(startup_validation, "_validate_environment", lambda: None)
     monkeypatch.setattr(startup_validation, "_validate_database", lambda: None)
-    monkeypatch.setattr(startup_validation, "_bootstrap_feature_tables", lambda: None)
-    monkeypatch.setattr(startup_validation, "_apply_additive_schema_updates", lambda: None)
+    monkeypatch.setattr(startup_validation, "_validate_schema_revision", lambda: None)
     monkeypatch.setattr(startup_validation, "_validate_schema_state", lambda: None)
     monkeypatch.setattr(startup_validation, "_validate_directories", lambda: None)
     monkeypatch.setattr(startup_validation, "_validate_assets", lambda: None)
     monkeypatch.setattr(startup_validation, "_validate_pdf_support", lambda: None)
     monkeypatch.setattr(startup_validation, "ensure_default_company_and_employee", lambda db: None)
     monkeypatch.setattr(startup_validation, "initialize_scan_model", lambda _path: sentinel_model)
-    monkeypatch.setenv("ENABLE_STARTUP_SCHEMA_BOOTSTRAP", "false")
 
     class _DummySession:
         def close(self):
@@ -47,14 +46,12 @@ def test_startup_validation_loads_model_successfully(monkeypatch):
 def test_startup_validation_fails_gracefully_when_model_load_fails(monkeypatch):
     monkeypatch.setattr(startup_validation, "_validate_environment", lambda: None)
     monkeypatch.setattr(startup_validation, "_validate_database", lambda: None)
-    monkeypatch.setattr(startup_validation, "_bootstrap_feature_tables", lambda: None)
-    monkeypatch.setattr(startup_validation, "_apply_additive_schema_updates", lambda: None)
+    monkeypatch.setattr(startup_validation, "_validate_schema_revision", lambda: None)
     monkeypatch.setattr(startup_validation, "_validate_schema_state", lambda: None)
     monkeypatch.setattr(startup_validation, "_validate_directories", lambda: None)
     monkeypatch.setattr(startup_validation, "_validate_assets", lambda: None)
     monkeypatch.setattr(startup_validation, "_validate_pdf_support", lambda: None)
     monkeypatch.setattr(startup_validation, "ensure_default_company_and_employee", lambda db: None)
-    monkeypatch.setenv("ENABLE_STARTUP_SCHEMA_BOOTSTRAP", "false")
 
     class _DummySession:
         def close(self):
@@ -75,6 +72,39 @@ def test_startup_validation_fails_gracefully_when_model_load_fails(monkeypatch):
         startup_validation.run_startup_validations()
 
     assert "XGBoost model could not be loaded" in str(exc.value)
+
+
+def test_schema_revision_validation_passes_when_revision_matches(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(255) NOT NULL)"))
+        conn.execute(
+            text("INSERT INTO alembic_version (version_num) VALUES (:revision)"),
+            {"revision": "20260311_0001_initial_schema"},
+        )
+
+    monkeypatch.setattr(startup_validation, "engine", engine)
+    monkeypatch.setattr(startup_validation, "MIGRATIONS_DIR", startup_validation.BASE_DIR / "migrations" / "versions")
+
+    startup_validation._validate_schema_revision()
+
+
+def test_schema_revision_validation_fails_when_revision_is_outdated(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(255) NOT NULL)"))
+        conn.execute(
+            text("INSERT INTO alembic_version (version_num) VALUES (:revision)"),
+            {"revision": "outdated_revision"},
+        )
+
+    monkeypatch.setattr(startup_validation, "engine", engine)
+    monkeypatch.setattr(startup_validation, "MIGRATIONS_DIR", startup_validation.BASE_DIR / "migrations" / "versions")
+
+    with pytest.raises(RuntimeError) as exc:
+        startup_validation._validate_schema_revision()
+
+    assert "Database schema version mismatch" in str(exc.value)
 
 
 def test_predict_pii_columns_uses_initialized_model():
