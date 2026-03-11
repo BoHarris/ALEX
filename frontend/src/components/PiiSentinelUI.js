@@ -2,12 +2,12 @@ import React, { useState } from "react";
 import { Card, CardContent } from "../components/card";
 import { Button } from "../components/button";
 import { Input } from "../components/input";
-import { SUPPORTED_EXTENSIONS } from "../utils/constants";
+import { FALLBACK_SUPPORTED_EXTENSIONS } from "../utils/fileTypes";
 import { authFetch } from "../utils/authFetch";
 import { getResponseMessage, readResponseData } from "../utils/http";
 import { downloadProtectedAsset, getDownloadErrorMessage } from "../utils/downloads";
 
-export default function PiiSentinelUI() {
+export default function PiiSentinelUI({ allowedTypes = FALLBACK_SUPPORTED_EXTENSIONS }) {
   const [file, setFile] = useState(null);
   const [piiColumns, setPiiColumns] = useState([]);
   const [riskScore, setRiskScore] = useState(null);
@@ -123,7 +123,7 @@ export default function PiiSentinelUI() {
             <Input
               id="file-upload"
               type="file"
-              accept={SUPPORTED_EXTENSIONS.join(",")}
+              accept={allowedTypes.join(",")}
               required
               onChange={handleFileChange}
             />

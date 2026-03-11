@@ -1,10 +1,30 @@
 import React from "react";
 import PiiSentinelUI from "../components/PiiSentinelUI";
 
-import { SUPPORTED_EXTENSIONS } from "../utils/constants";
+import { FALLBACK_SUPPORTED_EXTENSIONS, fetchSupportedFileTypes } from "../utils/fileTypes";
 
 function Upload() {
-  const [supportedFileTypes] = React.useState(SUPPORTED_EXTENSIONS);
+  const [supportedFileTypes, setSupportedFileTypes] = React.useState(FALLBACK_SUPPORTED_EXTENSIONS);
+
+  React.useEffect(() => {
+    let active = true;
+
+    fetchSupportedFileTypes()
+      .then((extensions) => {
+        if (active) {
+          setSupportedFileTypes(extensions);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setSupportedFileTypes(FALLBACK_SUPPORTED_EXTENSIONS);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   return (
     <div className="page-shell flex flex-col items-center justify-center gap-4 py-12">
@@ -16,7 +36,7 @@ function Upload() {
         {supportedFileTypes.join(",")}
       </p>
 
-      <PiiSentinelUI allowedTypes={SUPPORTED_EXTENSIONS} />
+      <PiiSentinelUI allowedTypes={supportedFileTypes} />
     </div>
   );
 }
