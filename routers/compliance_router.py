@@ -51,6 +51,12 @@ from services.test_metrics_service import (
     list_test_runs as query_test_runs,
     record_test_result,
 )
+from services.test_management_service import (
+    get_managed_test_detail,
+    get_managed_test_history,
+    get_test_management_dashboard,
+    list_managed_tests,
+)
 from utils.api_errors import error_payload
 
 router = APIRouter(prefix="/compliance", tags=["Compliance Workspace"])
@@ -989,61 +995,102 @@ def update_vendor(vendor_id: int, payload: VendorUpdateRequest, current_employee
 
 @router.get("/tests/dashboard")
 def get_test_dashboard(current_employee: dict = Depends(require_compliance_workspace_access), db: Session = Depends(get_db)):
-    runs = db.query(ComplianceTestRun).filter(ComplianceTestRun.organization_id == current_employee["organization_id"]).order_by(ComplianceTestRun.run_at.desc()).all()
-    grouped: dict[str, list[dict]] = {}
-    for run in runs:
-        grouped.setdefault(run.category, []).append(_serialize_test_run(run))
-    return {"categories": grouped}
+    return get_test_management_dashboard(db, organization_id=current_employee["organization_id"])
+
+
+@router.get("/tests/inventory")
+def list_managed_test_inventory(
+    category: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    search: str | None = Query(default=None),
+    sort: str = Query(default="last_run"),
+    current_employee: dict = Depends(require_compliance_workspace_access),
+    db: Session = Depends(get_db),
+):
+    return list_managed_tests(
+        db,
+        organization_id=current_employee["organization_id"],
+        category=category,
+        status=status,
+        search=search,
+        sort=sort,
+    )
 
 
 @router.get("/tests/categories/{category_name}")
 def get_test_category_detail(category_name: str, current_employee: dict = Depends(require_compliance_workspace_access), db: Session = Depends(get_db)):
-    runs = (
-        db.query(ComplianceTestRun)
-        .filter(ComplianceTestRun.organization_id == current_employee["organization_id"], ComplianceTestRun.category == category_name)
-        .order_by(ComplianceTestRun.run_at.desc())
-        .all()
+    payload = list_managed_tests(
+        db,
+        organization_id=current_employee["organization_id"],
+        category=category_name,
+        sort="last_run",
     )
-    if not runs:
+    if not payload["tests"]:
         raise HTTPException(status_code=404, detail=error_payload(detail="Test category not found", error_code="not_found"))
-    latest_run = runs[0]
-    cases = db.query(ComplianceTestCaseResult).filter(ComplianceTestCaseResult.test_run_id == latest_run.id).order_by(ComplianceTestCaseResult.name.asc()).all()
-    passing = sum(1 for case in cases if case.status == "passed")
-    failing = sum(1 for case in cases if case.status == "failed")
-    skipped = sum(1 for case in cases if case.status == "skipped")
-    total = len(cases)
+    summary = payload["summary"]
+    latest_run_timestamp = max((item["last_run_timestamp"] for item in payload["tests"] if item["last_run_timestamp"]), default=None)
     return {
         "category": category_name,
         "summary": {
-            "total_tests": total,
-            "passing": passing,
-            "failing": failing,
-            "skipped": skipped,
-            "pass_rate": round((passing / total) * 100, 2) if total else 0,
-            "last_run_timestamp": latest_run.run_at.isoformat() if latest_run.run_at else None,
-            "accuracy_score": float(latest_run.accuracy_score) if latest_run.accuracy_score is not None else None,
-            "dataset_name": latest_run.dataset_name,
+            "total_tests": summary["total_tests"],
+            "passing": summary["passing"],
+            "failing": summary["failing"],
+            "skipped": summary["skipped"],
+            "flaky": summary["flaky"],
+            "pass_rate": summary["average_pass_rate"],
+            "last_run_timestamp": latest_run_timestamp,
         },
-        "tests": [_serialize_test_case(case, latest_run) for case in cases],
+        "tests": payload["tests"],
     }
 
 
-@router.get("/tests/cases/{case_id}")
-def get_test_case_detail(case_id: int, current_employee: dict = Depends(require_compliance_workspace_access), db: Session = Depends(get_db)):
-    case = (
-        db.query(ComplianceTestCaseResult, ComplianceTestRun)
-        .join(ComplianceTestRun, ComplianceTestRun.id == ComplianceTestCaseResult.test_run_id)
-        .filter(ComplianceTestCaseResult.id == case_id, ComplianceTestRun.organization_id == current_employee["organization_id"])
-        .first()
-    )
-    if not case:
+@router.get("/tests/cases/{test_id}")
+def get_test_case_detail(test_id: str, current_employee: dict = Depends(require_compliance_workspace_access), db: Session = Depends(get_db)):
+    test_id_value = str(test_id)
+    if test_id_value.isdigit():
+        case = (
+            db.query(ComplianceTestCaseResult, ComplianceTestRun)
+            .join(ComplianceTestRun, ComplianceTestRun.id == ComplianceTestCaseResult.test_run_id)
+            .filter(ComplianceTestCaseResult.id == int(test_id_value), ComplianceTestRun.organization_id == current_employee["organization_id"])
+            .first()
+        )
+        if not case:
+            raise HTTPException(status_code=404, detail=error_payload(detail="Test case not found", error_code="not_found"))
+        result, run = case
+        payload = _serialize_test_case(result, run)
+        payload["test_id"] = test_id_value
+        payload["last_execution_time"] = payload.pop("last_run_timestamp")
+        payload["output"] = payload.pop("output_summary")
+        payload["error_message"] = payload.pop("error_details")
+        return payload
+
+    try:
+        payload = get_managed_test_detail(
+            db,
+            organization_id=current_employee["organization_id"],
+            test_id=test_id_value,
+        )
+    except ValueError:
         raise HTTPException(status_code=404, detail=error_payload(detail="Test case not found", error_code="not_found"))
-    result, run = case
-    payload = _serialize_test_case(result, run)
-    payload["last_execution_time"] = payload.pop("last_run_timestamp")
-    payload["output"] = payload.pop("output_summary")
-    payload["error_message"] = payload.pop("error_details")
-    return payload
+
+    detail = dict(payload)
+    detail["last_execution_time"] = detail.get("last_run_timestamp")
+    detail["output"] = detail.get("latest_execution", {}).get("output")
+    detail["error_message"] = detail.get("latest_execution", {}).get("error_message")
+    return detail
+
+
+@router.get("/tests/cases/{test_id}/history")
+def get_test_case_history(test_id: str, current_employee: dict = Depends(require_compliance_workspace_access), db: Session = Depends(get_db)):
+    try:
+        history = get_managed_test_history(
+            db,
+            organization_id=current_employee["organization_id"],
+            test_id=test_id,
+        )
+    except ValueError:
+        raise HTTPException(status_code=404, detail=error_payload(detail="Test case not found", error_code="not_found"))
+    return {"history": history}
 
 
 @router.post("/tests/runs")
