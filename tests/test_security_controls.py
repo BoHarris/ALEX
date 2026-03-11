@@ -18,7 +18,7 @@ from dependencies.tier_guard import require_company_admin, require_security_admi
 from routers import redacted_router
 from services.audit_service import record_audit_event
 from services.retention_service import apply_retention_state
-from services.security_service import register_failed_login
+from services.security_service import extract_request_security_context, register_failed_login
 
 
 def _session():
@@ -194,3 +194,39 @@ def test_retention_policy_marks_expired_scan():
     session.commit()
     session.refresh(scan)
     assert scan.status == "expired"
+
+
+def test_request_security_context_ignores_untrusted_forwarded_headers(monkeypatch):
+    request = SimpleNamespace(
+        headers={
+            "user-agent": "pytest-agent",
+            "x-forwarded-for": "203.0.113.10",
+            "x-device-fingerprint": "client-asserted",
+        },
+        client=SimpleNamespace(host="127.0.0.1"),
+        state=SimpleNamespace(request_id="req-test"),
+    )
+
+    monkeypatch.setattr("services.security_service.TRUST_PROXY_HEADERS", False)
+    monkeypatch.setattr("services.security_service.TRUSTED_PROXY_IPS", set())
+    context = extract_request_security_context(request)
+
+    assert context.ip_address == "127.0.0.1"
+    assert context.advisory_ip_address == "203.0.113.10"
+    assert context.trusted_proxy is False
+    assert context.device_fingerprint != "client-asserted"
+
+
+def test_request_security_context_uses_trusted_forwarded_headers(monkeypatch):
+    request = SimpleNamespace(
+        headers={"user-agent": "pytest-agent", "x-forwarded-for": "203.0.113.10"},
+        client=SimpleNamespace(host="10.0.0.5"),
+        state=SimpleNamespace(request_id="req-test"),
+    )
+
+    monkeypatch.setattr("services.security_service.TRUST_PROXY_HEADERS", False)
+    monkeypatch.setattr("services.security_service.TRUSTED_PROXY_IPS", {"10.0.0.5"})
+    context = extract_request_security_context(request)
+
+    assert context.ip_address == "203.0.113.10"
+    assert context.trusted_proxy is True

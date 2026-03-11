@@ -17,6 +17,7 @@ from database.models.user import User
 from database.models.webauthn_challenge import WebAuthnChallenge
 from services.audit_service import record_audit_event
 from services.compliance_service import ensure_default_company_and_employee
+from services.refresh_session_service import issue_bound_refresh_token
 from services.security_service import extract_request_security_context, register_failed_login
 from utils.auth_utils import create_access_token, ensure_user_is_active
 from utils.api_errors import error_payload
@@ -236,6 +237,31 @@ def _clean_optional(value: str | None) -> str | None:
 def _ensure_authenticating_user_is_active(user: User) -> None:
     # Authentication must stop immediately for deactivated accounts.
     ensure_user_is_active(user)
+
+
+def _issue_refresh_cookie(
+    *,
+    db: Session,
+    request: Request,
+    response: Response,
+    user: User,
+) -> None:
+    request_context = extract_request_security_context(request)
+    refresh_token = issue_bound_refresh_token(
+        db,
+        user_id=user.id,
+        refresh_version=int(getattr(user, "refresh_version", 0)),
+        context=request_context,
+    )
+    db.commit()
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        samesite="strict",
+        max_age=REFRESH_TOKEN_TTL * 60,
+        secure=IS_PROD,
+    )
 
 
 def _resolve_company_membership(
@@ -831,18 +857,11 @@ def webauthn_login_verify(
         },
         expires_delta=timedelta(minutes=ACCESS_TOKEN_TTL),
     )
-    refresh_token = create_access_token(
-        data={"sub": str(user.id), "ver": int(getattr(user, "refresh_version", 0)), "typ": "refresh"},
-        expires_delta=timedelta(minutes=REFRESH_TOKEN_TTL),
-    )
-
-    response.set_cookie(
-        key="refresh_token",
-        value=refresh_token,
-        httponly=True,
-        samesite="strict",
-        max_age=REFRESH_TOKEN_TTL * 60,
-        secure=IS_PROD,
+    _issue_refresh_cookie(
+        db=db,
+        request=request,
+        response=response,
+        user=user,
     )
     
 
@@ -954,16 +973,10 @@ def employee_webauthn_login_verify(
         data={"sub": str(user.id), "email": user.email, "tier": getattr(user, "tier", "business"), "role": normalize_role(user.role)},
         expires_delta=timedelta(minutes=ACCESS_TOKEN_TTL),
     )
-    refresh_token = create_access_token(
-        data={"sub": str(user.id), "ver": int(getattr(user, "refresh_version", 0)), "typ": "refresh"},
-        expires_delta=timedelta(minutes=REFRESH_TOKEN_TTL),
-    )
-    response.set_cookie(
-        key="refresh_token",
-        value=refresh_token,
-        httponly=True,
-        samesite="strict",
-        max_age=REFRESH_TOKEN_TTL * 60,
-        secure=IS_PROD,
+    _issue_refresh_cookie(
+        db=db,
+        request=request,
+        response=response,
+        user=user,
     )
     return {"access_token": access_token, "token_type": "bearer", "employee": True}

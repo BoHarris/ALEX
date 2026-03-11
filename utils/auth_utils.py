@@ -58,6 +58,24 @@ def create_refresh_token(user_id: int, refresh_version: int) -> str:
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
+def issue_refresh_token(user_id: int, refresh_version: int) -> tuple[str, str]:
+    refresh_jti = str(uuid.uuid4())
+    expire = datetime.now(timezone.utc) + timedelta(minutes=REFRESH_TOKEN_EXPIRE_MINUTES)
+    to_encode = {
+        "sub": str(user_id),
+        "ver": str(refresh_version),
+        "typ": "refresh",
+        "exp": expire,
+        "iat": datetime.now(timezone.utc),
+        "jti": refresh_jti,
+    }
+    if JWT_ISSUER:
+        to_encode["iss"] = JWT_ISSUER
+    if JWT_AUDIENCE:
+        to_encode["aud"] = JWT_AUDIENCE
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM), refresh_jti
+
+
 def _decode_token(
     token: str,
     *,

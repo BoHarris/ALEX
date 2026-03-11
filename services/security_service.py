@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from threading import Lock
@@ -32,22 +33,93 @@ _ip_window: dict[str, set[str]] = {}
 class RequestSecurityContext:
     ip_address: str | None = None
     device_fingerprint: str | None = None
+    user_agent: str | None = None
+    advisory_ip_address: str | None = None
+    trusted_proxy: bool = False
+    session_binding_hash: str | None = None
     request_id: str | None = None
+
+
+TRUST_PROXY_HEADERS = (os.getenv("TRUST_PROXY_HEADERS") or "false").strip().lower() == "true"
+TRUSTED_PROXY_IPS = {
+    value.strip()
+    for value in (os.getenv("TRUSTED_PROXY_IPS") or "").split(",")
+    if value.strip()
+}
+
+
+def _normalize_header_value(value: str | None, *, max_length: int = 512) -> str | None:
+    if value is None:
+        return None
+    normalized = " ".join(value.strip().split())
+    if not normalized:
+        return None
+    return normalized[:max_length]
+
+
+def _hash_value(value: str | None) -> str | None:
+    if not value:
+        return None
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _request_peer_ip(request) -> str | None:
+    if getattr(request, "client", None) and getattr(request.client, "host", None):
+        return request.client.host
+    return None
+
+
+def _trusted_forwarded_ip(headers, *, peer_ip: str | None) -> tuple[str | None, bool, str | None]:
+    forwarded_for = _normalize_header_value(headers.get("x-forwarded-for"), max_length=256)
+    if not forwarded_for:
+        return peer_ip, False, None
+
+    advisory_ip = forwarded_for.split(",", 1)[0].strip() or None
+    if not advisory_ip:
+        return peer_ip, False, None
+
+    proxy_trusted = TRUST_PROXY_HEADERS or (peer_ip is not None and peer_ip in TRUSTED_PROXY_IPS)
+    if not proxy_trusted:
+        return peer_ip, False, advisory_ip
+
+    return advisory_ip, True, advisory_ip
+
+
+def build_session_binding_hash(
+    *,
+    user_agent: str | None,
+    advisory_device_fingerprint: str | None,
+) -> str | None:
+    normalized_user_agent = _normalize_header_value(user_agent)
+    normalized_device_fingerprint = _normalize_header_value(advisory_device_fingerprint, max_length=256)
+    binding_parts = [
+        part
+        for part in (normalized_user_agent, normalized_device_fingerprint)
+        if part
+    ]
+    if not binding_parts:
+        return None
+    return _hash_value("|".join(binding_parts))
 
 
 def extract_request_security_context(request) -> RequestSecurityContext:
     headers = getattr(request, "headers", {}) or {}
-    forwarded_for = headers.get("x-forwarded-for")
-    ip_address = None
-    if forwarded_for:
-        ip_address = forwarded_for.split(",", 1)[0].strip()
-    elif getattr(request, "client", None) and getattr(request.client, "host", None):
-        ip_address = request.client.host
-    device_fingerprint = headers.get("x-device-fingerprint") or headers.get("user-agent")
+    peer_ip = _request_peer_ip(request)
+    ip_address, trusted_proxy, advisory_ip = _trusted_forwarded_ip(headers, peer_ip=peer_ip)
+    user_agent = _normalize_header_value(headers.get("user-agent"))
+    advisory_device_fingerprint = _normalize_header_value(headers.get("x-device-fingerprint"), max_length=256)
+    device_fingerprint = _hash_value(advisory_device_fingerprint)
     request_id = getattr(getattr(request, "state", None), "request_id", None)
     return RequestSecurityContext(
         ip_address=ip_address,
         device_fingerprint=device_fingerprint,
+        user_agent=user_agent,
+        advisory_ip_address=advisory_ip,
+        trusted_proxy=trusted_proxy,
+        session_binding_hash=build_session_binding_hash(
+            user_agent=user_agent,
+            advisory_device_fingerprint=advisory_device_fingerprint,
+        ),
         request_id=request_id,
     )
 

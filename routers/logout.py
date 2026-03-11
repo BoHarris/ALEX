@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from database.database import get_db
 from database.models.user import User
 from services.audit_service import record_audit_event
+from services.refresh_session_service import revoke_refresh_session
 from services.security_service import extract_request_security_context
 from utils.auth_utils import decode_refresh_token_with_error
 import os
@@ -30,9 +31,12 @@ def logout(
         payload, _ = decode_refresh_token_with_error(refresh_token)
         if payload:
             user_id = _parse_subject_as_int(payload.get("sub"))
+            refresh_jti = payload.get("jti")
             if user_id:
                 user = db.query(User).filter(User.id == user_id).first()
                 if user:
+                    if refresh_jti:
+                        revoke_refresh_session(db, refresh_jti=refresh_jti)
                     current_ver = int(getattr(user, "refresh_version", 0))
                     setattr(user, "refresh_version", current_ver + 1)
                     db.add(user)

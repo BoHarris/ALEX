@@ -7,6 +7,7 @@ from .audit_event import AuditEvent
 from .audit_log import AuditLog
 from .scan_quota_counter import ScanQuotaCounter
 from .security_incident import SecurityIncident
+from .refresh_session import RefreshSession
 from .employee import Employee
 from .compliance_record import ComplianceRecord
 from .compliance_comment import ComplianceComment
