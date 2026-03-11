@@ -476,6 +476,7 @@ def test_test_dashboard_inventory_and_history_support_management_views():
         first_run["id"],
         compliance_router.TestResultCreateRequest(
             test_name="detect_email",
+            file_path="tests/privacy_tests.py",
             dataset_name="synthetic_history",
             expected_result="PII_EMAIL",
             actual_result="PII_EMAIL",
@@ -491,6 +492,7 @@ def test_test_dashboard_inventory_and_history_support_management_views():
         second_run["id"],
         compliance_router.TestResultCreateRequest(
             test_name="detect_email",
+            file_path="tests/privacy_tests.py",
             dataset_name="synthetic_history",
             expected_result="PII_EMAIL",
             actual_result="NON_PII",
@@ -507,6 +509,7 @@ def test_test_dashboard_inventory_and_history_support_management_views():
         second_run["id"],
         compliance_router.TestResultCreateRequest(
             test_name="detect_phone",
+            file_path="tests/privacy_tests.py",
             dataset_name="synthetic_history",
             expected_result="PII_PHONE",
             actual_result="PII_PHONE",
@@ -528,7 +531,7 @@ def test_test_dashboard_inventory_and_history_support_management_views():
         current_employee=_employee_context(employee),
         db=session,
     )
-    test_id = encode_test_id(category="privacy tests", test_name="detect_email")
+    test_id = encode_test_id(test_name="detect_email", file_path="tests/privacy_tests.py")
     detail = compliance_router.get_test_case_detail(test_id, current_employee=_employee_context(employee), db=session)
     history = compliance_router.get_test_case_history(test_id, current_employee=_employee_context(employee), db=session)
 
@@ -540,8 +543,77 @@ def test_test_dashboard_inventory_and_history_support_management_views():
     assert inventory["tests"][0]["test_name"] == "detect_email"
     assert detail["trend"] in {"unstable", "degrading"}
     assert detail["total_runs"] == 2
+    assert detail["file_path"] == "tests/privacy_tests.py"
     assert len(history["history"]) == 2
     assert history["history"][0]["status"] in {"failed", "passed"}
+
+
+def test_inventory_renders_same_file_tests_and_same_name_different_files_separately():
+    session = _session()
+    _, _, employee = _seed_org(session)
+
+    run = compliance_router.create_test_run(
+        compliance_router.TestRunCreateRequest(
+            category="privacy tests",
+            suite_name="PII validation suite",
+            status="running",
+            dataset_name="synthetic_split_inventory",
+        ),
+        current_employee=_employee_context(employee),
+        db=session,
+    )
+
+    payloads = [
+        compliance_router.TestResultCreateRequest(
+            test_name="test_detect_email",
+            file_path="tests/privacy_tests.py",
+            dataset_name="synthetic_split_inventory",
+            expected_result="PII_EMAIL",
+            actual_result="PII_EMAIL",
+            status="passed",
+            confidence_score=0.91,
+        ),
+        compliance_router.TestResultCreateRequest(
+            test_name="test_detect_phone",
+            file_path="tests/privacy_tests.py",
+            dataset_name="synthetic_split_inventory",
+            expected_result="PII_PHONE",
+            actual_result="PII_PHONE",
+            status="passed",
+            confidence_score=0.84,
+        ),
+        compliance_router.TestResultCreateRequest(
+            test_name="test_detect_email",
+            file_path="tests/security_tests.py",
+            dataset_name="synthetic_split_inventory",
+            expected_result="PII_EMAIL",
+            actual_result="NON_PII",
+            status="failed",
+            confidence_score=0.14,
+            error_message="Security suite variant failed.",
+        ),
+    ]
+    for payload in payloads:
+        compliance_router.create_test_result(
+            run["id"],
+            payload,
+            current_employee=_employee_context(employee),
+            db=session,
+        )
+
+    inventory = compliance_router.list_managed_test_inventory(
+        category="privacy tests",
+        search="tests/",
+        sort="name",
+        current_employee=_employee_context(employee),
+        db=session,
+    )
+
+    test_node_ids = {item["test_node_id"] for item in inventory["tests"] if item["file_path"] in {"tests/privacy_tests.py", "tests/security_tests.py"}}
+    assert "tests/privacy_tests.py::test_detect_email" in test_node_ids
+    assert "tests/privacy_tests.py::test_detect_phone" in test_node_ids
+    assert "tests/security_tests.py::test_detect_email" in test_node_ids
+    assert len(test_node_ids) == 3
 
 
 def test_compliance_overview_returns_attention_data():

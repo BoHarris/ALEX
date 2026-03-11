@@ -57,6 +57,7 @@ from services.test_management_service import (
     get_test_management_dashboard,
     list_managed_tests,
 )
+from services.test_discovery_service import build_test_node_id, normalize_test_file_path, split_test_node_id
 from utils.api_errors import error_payload
 
 router = APIRouter(prefix="/compliance", tags=["Compliance Workspace"])
@@ -193,13 +194,16 @@ def _serialize_test_run(run: ComplianceTestRun) -> dict:
 
 
 def _serialize_test_case(case: ComplianceTestCaseResult, run: ComplianceTestRun | None = None) -> dict:
+    file_path = normalize_test_file_path(case.file_name)
     payload = {
         "id": case.id,
         "test_name": case.name,
+        "test_node_id": build_test_node_id(test_name=case.name, file_path=file_path, category=run.category if run is not None else None),
         "dataset_name": case.dataset_name,
         "status": case.status,
         "description": case.description,
-        "file_name": case.file_name,
+        "file_path": file_path,
+        "file_name": file_path,
         "expected_result": case.expected_result,
         "actual_result": case.actual_result,
         "confidence_score": float(case.confidence_score) if case.confidence_score is not None else None,
@@ -296,7 +300,9 @@ class TestRunCreateRequest(BaseModel):
 
 class TestResultCreateRequest(BaseModel):
     test_name: str
+    test_node_id: str | None = None
     dataset_name: str | None = None
+    file_path: str | None = None
     file_name: str | None = None
     description: str | None = None
     expected_result: str | None = None
@@ -1000,10 +1006,11 @@ def get_test_dashboard(current_employee: dict = Depends(require_compliance_works
 
 @router.get("/tests/inventory")
 def list_managed_test_inventory(
-    category: str | None = Query(default=None),
-    status: str | None = Query(default=None),
-    search: str | None = Query(default=None),
-    sort: str = Query(default="last_run"),
+    category: str | None = None,
+    status: str | None = None,
+    search: str | None = None,
+    file_path: str | None = None,
+    sort: str = "last_run",
     current_employee: dict = Depends(require_compliance_workspace_access),
     db: Session = Depends(get_db),
 ):
@@ -1013,6 +1020,7 @@ def list_managed_test_inventory(
         category=category,
         status=status,
         search=search,
+        file_path=file_path,
         sort=sort,
     )
 
@@ -1036,6 +1044,7 @@ def get_test_category_detail(category_name: str, current_employee: dict = Depend
             "passing": summary["passing"],
             "failing": summary["failing"],
             "skipped": summary["skipped"],
+            "not_run": summary["not_run"],
             "flaky": summary["flaky"],
             "pass_rate": summary["average_pass_rate"],
             "last_run_timestamp": latest_run_timestamp,
@@ -1082,11 +1091,27 @@ def get_test_case_detail(test_id: str, current_employee: dict = Depends(require_
 
 @router.get("/tests/cases/{test_id}/history")
 def get_test_case_history(test_id: str, current_employee: dict = Depends(require_compliance_workspace_access), db: Session = Depends(get_db)):
+    test_id_value = str(test_id)
+    if test_id_value.isdigit():
+        case = (
+            db.query(ComplianceTestCaseResult, ComplianceTestRun)
+            .join(ComplianceTestRun, ComplianceTestRun.id == ComplianceTestCaseResult.test_run_id)
+            .filter(ComplianceTestCaseResult.id == int(test_id_value), ComplianceTestRun.organization_id == current_employee["organization_id"])
+            .first()
+        )
+        if not case:
+            raise HTTPException(status_code=404, detail=error_payload(detail="Test case not found", error_code="not_found"))
+        result, run = case
+        payload = _serialize_test_case(result, run)
+        payload["test_node_id"] = build_test_node_id(test_name=result.name, file_path=result.file_name, category=run.category)
+        payload["output"] = payload.pop("output_summary")
+        payload["error_message"] = payload.pop("error_details")
+        return {"history": [payload]}
     try:
         history = get_managed_test_history(
             db,
             organization_id=current_employee["organization_id"],
-            test_id=test_id,
+            test_id=test_id_value,
         )
     except ValueError:
         raise HTTPException(status_code=404, detail=error_payload(detail="Test case not found", error_code="not_found"))
@@ -1123,16 +1148,17 @@ def create_test_result(
     if not run:
         raise HTTPException(status_code=404, detail=error_payload(detail="Test run not found", error_code="not_found"))
 
+    derived_file_path, derived_test_name = split_test_node_id(payload.test_node_id) if payload.test_node_id else (None, payload.test_name)
     result = record_test_result(
         db,
         test_run_id=run.id,
-        test_name=payload.test_name,
+        test_name=derived_test_name,
         dataset_name=payload.dataset_name or run.dataset_name,
         expected_result=payload.expected_result,
         actual_result=payload.actual_result,
         status=payload.status,
         confidence_score=float(payload.confidence_score) if payload.confidence_score is not None else None,
-        file_name=payload.file_name,
+        file_name=payload.file_path or derived_file_path or payload.file_name,
         description=payload.description,
         duration_ms=payload.duration_ms,
         output=payload.output,

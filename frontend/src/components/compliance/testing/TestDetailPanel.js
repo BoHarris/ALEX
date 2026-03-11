@@ -16,7 +16,8 @@ function HistoryItem({ item }) {
       <div className="flex items-start justify-between gap-3">
         <div>
           <p className="font-semibold text-app">{item.suite_name}</p>
-          <p className="mt-1 text-xs text-app-muted">{formatDateTime(item.last_run_timestamp)} · {item.environment}</p>
+          <p className="mt-1 text-xs text-app-muted">{formatDateTime(item.last_run_timestamp)} | {item.environment}</p>
+          <p className="mt-1 text-[11px] text-app-muted">{item.file_path || item.file_name || "No file path recorded"}</p>
         </div>
         <span className={`rounded-full px-3 py-1 text-xs font-semibold ${statusBadgeClass(item.status)}`}>{item.status}</span>
       </div>
@@ -42,13 +43,15 @@ export default function TestDetailPanel({ test }) {
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.2em] text-app-muted">Selected Test</p>
           <h2 className="mt-2 text-2xl font-semibold text-app">{test.test_name}</h2>
-          <p className="mt-2 text-sm text-app-secondary">{test.category} · {test.suite_name}</p>
+          <p className="mt-2 text-sm text-app-secondary">{test.category} | {test.suite_name}</p>
         </div>
         <span className={`rounded-full px-3 py-1 text-xs font-semibold ${statusBadgeClass(test.status)}`}>{test.status}</span>
       </div>
 
       <div className="mt-5 grid gap-3 sm:grid-cols-2">
         <DetailField label="Test ID">{test.test_id}</DetailField>
+        <DetailField label="Pytest Node ID">{test.test_node_id || "Not recorded"}</DetailField>
+        <DetailField label="File Path">{test.file_path || test.file_name || "Not recorded"}</DetailField>
         <DetailField label="Latest Environment">{test.latest_environment || "default"}</DetailField>
         <DetailField label="Pass Rate">{formatPercent(test.pass_rate)}</DetailField>
         <DetailField label="Flake Rate">{formatPercent((test.flake_rate || 0) * 100)}</DetailField>

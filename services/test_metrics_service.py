@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from database.models.compliance_test_case_result import ComplianceTestCaseResult
 from database.models.compliance_test_run import ComplianceTestRun
+from services.test_discovery_service import split_test_node_id
 
 
 NON_PII_SENTINELS = {"", "NONE", "NON_PII", "NOT_PII", "NO_DETECTION", "NULL"}
@@ -54,22 +55,25 @@ def record_test_result(
     *,
     test_run_id: int,
     test_name: str,
+    test_node_id: str | None = None,
     dataset_name: str | None,
     expected_result: str | None,
     actual_result: str | None,
     status: str,
     confidence_score: float | None,
+    file_path: str | None = None,
     file_name: str | None = None,
     description: str | None = None,
     duration_ms: int | None = None,
     output: str | None = None,
     error_message: str | None = None,
 ) -> ComplianceTestCaseResult:
+    derived_file_path, derived_test_name = split_test_node_id(test_node_id) if test_node_id else (None, test_name)
     result = ComplianceTestCaseResult(
         test_run_id=test_run_id,
-        name=test_name,
+        name=derived_test_name,
         dataset_name=dataset_name,
-        file_name=file_name,
+        file_name=file_path or derived_file_path or file_name,
         description=description,
         expected_result=expected_result,
         actual_result=actual_result,
@@ -90,10 +94,12 @@ def track_test_execution(
     *,
     test_run_id: int,
     test_name: str,
+    test_node_id: str | None = None,
     dataset_name: str | None,
     expected_result: str | None,
     actual_result: str | None,
     confidence_score: float | None,
+    file_path: str | None = None,
     file_name: str | None = None,
     description: str | None = None,
     output: str | None = None,
@@ -107,11 +113,13 @@ def track_test_execution(
         db,
         test_run_id=test_run_id,
         test_name=test_name,
+        test_node_id=test_node_id,
         dataset_name=dataset_name,
         expected_result=normalized_expected or None,
         actual_result=normalized_actual or None,
         status=status,
         confidence_score=confidence_score,
+        file_path=file_path,
         file_name=file_name,
         description=description,
         duration_ms=round((perf_counter() - started_at) * 1000),
