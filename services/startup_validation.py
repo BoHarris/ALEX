@@ -28,7 +28,7 @@ REQUIRED_SCHEMA = {
     "scan_results": {"id", "user_id", "company_id", "filename", "redacted_type_counts"},
     "webauthn_challenges": {"id", "user_id", "challenge", "challenge_type", "expires_at"},
     "company_settings": {"id", "company_id", "default_policy_label", "allowed_upload_types"},
-    "audit_events": {"id", "company_id", "user_id", "event_type", "description", "created_at"},
+    "audit_events": {"id", "company_id", "user_id", "event_type", "event_category", "description", "event_metadata", "created_at"},
     "audit_logs": {"id", "user_id", "organization_id", "event_type", "event_category", "created_at"},
     "security_states": {"id", "namespace", "state_key", "counter_value", "expires_at"},
     "scan_quota_counters": {"id", "user_id", "day", "count"},

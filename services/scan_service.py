@@ -885,6 +885,8 @@ def _persist_scan_result(
             target_type="scan",
             target_id=str(scan.id),
             event_metadata={
+                "scan_id": scan.id,
+                "filename": filename,
                 "file_type": ext.lstrip("."),
                 "risk_score": risk_score,
                 "total_redacted": total_redacted,
