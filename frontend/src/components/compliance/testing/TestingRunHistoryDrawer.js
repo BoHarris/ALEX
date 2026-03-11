@@ -1,5 +1,6 @@
 import DetailDrawer from "../DetailDrawer";
 import { formatDateTime, formatPercent, statusBadgeClass } from "../../../pages/compliance/utils";
+import TestDetailPanel from "./TestDetailPanel";
 
 function RunHistoryCard({ item }) {
   return (
@@ -43,7 +44,7 @@ function RunHistoryCard({ item }) {
   );
 }
 
-export default function TestingRunHistoryDrawer({ open, test, onClose }) {
+export default function TestingRunHistoryDrawer({ open, test, employees, onClose, onCreateTask, onUpdateTask }) {
   const history = test?.history || [];
   const title = test?.test_name || "Execution History";
   const subtitle = test
@@ -68,7 +69,7 @@ export default function TestingRunHistoryDrawer({ open, test, onClose }) {
               <div className="min-w-0">
                 <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-app-muted">Run History Inspector</p>
                 <p className="mt-3 text-sm leading-6 text-app-secondary">
-                  Focused execution timeline for the selected test. The main detail panel remains available for summary, quality, and remediation.
+                  Selected test summary, remediation workflow, and execution timeline in one dedicated inspector.
                 </p>
               </div>
               <span className={`rounded-full px-3 py-1 text-xs font-semibold ${statusBadgeClass(test.status || "unknown")}`}>
@@ -91,10 +92,26 @@ export default function TestingRunHistoryDrawer({ open, test, onClose }) {
             </div>
           </div>
 
-          <div className="space-y-4">
+          <div className="rounded-3xl border border-app/80 bg-app/20 p-5">
+            <TestDetailPanel
+              test={test}
+              employees={employees}
+              onCreateTask={onCreateTask}
+              onUpdateTask={onUpdateTask}
+              embedded
+            />
+          </div>
+
+          <div>
+            <div className="mb-4 flex items-center justify-between gap-3">
+              <h3 className="text-lg font-semibold text-app">Execution History</h3>
+              <p className="text-xs text-app-muted">{history.length} recorded runs</p>
+            </div>
+            <div className="space-y-4">
             {history.length ? history.map((item) => (
               <RunHistoryCard key={`${item.run_id}-${item.result_id}`} item={item} />
             )) : <p className="text-sm text-app-muted">No historical executions recorded.</p>}
+            </div>
           </div>
         </div>
       ) : (

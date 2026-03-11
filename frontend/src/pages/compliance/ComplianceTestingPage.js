@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import SummaryMetricCard from "../../components/compliance/SummaryMetricCard";
 import WorkspaceEmptyState from "../../components/compliance/WorkspaceEmptyState";
 import TestCategoryRail from "../../components/compliance/testing/TestCategoryRail";
-import TestDetailPanel from "../../components/compliance/testing/TestDetailPanel";
 import TestInventoryTable from "../../components/compliance/testing/TestInventoryTable";
 import TestingRunHistoryDrawer from "../../components/compliance/testing/TestingRunHistoryDrawer";
 import { useCompliancePageContext } from "./useCompliancePageContext";
@@ -126,10 +125,13 @@ export default function ComplianceTestingPage() {
       <TestingRunHistoryDrawer
         open={historyDrawerOpen}
         test={activeDrawerTest}
+        employees={data?.directory?.employees || []}
+        onCreateTask={createOrAssignTestTask}
+        onUpdateTask={updateTestTask}
         onClose={() => setHistoryDrawerOpen(false)}
       />
 
-      <div className="grid gap-6 xl:grid-cols-[300px_minmax(0,1fr)] 2xl:grid-cols-[300px_minmax(0,0.92fr)_minmax(560px,1.12fr)]">
+      <div className="grid gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
         <TestCategoryRail
           categories={categories}
           selectedCategory={selectedCategory}
@@ -230,13 +232,6 @@ export default function ComplianceTestingPage() {
             <WorkspaceEmptyState title="No category selected" description="Choose a test suite from the left panel to inspect automated test inventory and execution history." />
           )}
         </section>
-
-        <TestDetailPanel
-          test={selectedTestCase}
-          employees={data?.directory?.employees || []}
-          onCreateTask={createOrAssignTestTask}
-          onUpdateTask={updateTestTask}
-        />
       </div>
     </div>
   );

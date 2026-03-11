@@ -174,9 +174,7 @@ test("renders individual tests from the same file separately and shows node meta
   expect(screen.getByText("test_detect_phone")).toBeInTheDocument();
   expect(screen.getByText("test_detect_ssn")).toBeInTheDocument();
   expect(screen.getAllByText("tests/privacy_tests.py").length).toBeGreaterThan(0);
-  expect(screen.getByText("Pytest Node ID")).toBeInTheDocument();
-  expect(screen.getByText("tests/privacy_tests.py::test_detect_email")).toBeInTheDocument();
-  expect(screen.getAllByText(/Regressed/i).length).toBeGreaterThan(0);
+  expect(screen.queryByText("Pytest Node ID")).not.toBeInTheDocument();
 
   await waitFor(() => {
     expect(mockLoadTestCategory).toHaveBeenCalled();
@@ -213,6 +211,8 @@ test("opens a run history drawer for the selected test and supports closing it",
 
   expect(screen.getByRole("dialog", { name: "test_detect_email" })).toBeInTheDocument();
   expect(screen.getByText("Run History Inspector")).toBeInTheDocument();
+  expect(screen.getByText("Pytest Node ID")).toBeInTheDocument();
+  expect(screen.getByText("tests/privacy_tests.py::test_detect_email")).toBeInTheDocument();
   expect(screen.getByText("Detector missed expected email classification.")).toBeInTheDocument();
 
   await user.click(screen.getByRole("button", { name: "Close" }));
@@ -220,5 +220,5 @@ test("opens a run history drawer for the selected test and supports closing it",
   await waitFor(() => {
     expect(screen.queryByRole("dialog", { name: "test_detect_email" })).not.toBeInTheDocument();
   });
-  expect(screen.getByText("Selected Test")).toBeInTheDocument();
+  expect(screen.queryByText("Selected Test")).not.toBeInTheDocument();
 });

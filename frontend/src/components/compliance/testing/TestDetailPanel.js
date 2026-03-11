@@ -11,15 +11,16 @@ function DetailField({ label, children }) {
   );
 }
 
-export default function TestDetailPanel({ test, employees, onCreateTask, onUpdateTask }) {
+export default function TestDetailPanel({ test, employees, onCreateTask, onUpdateTask, embedded = false }) {
   if (!test) {
     return <WorkspaceEmptyState title="Select a test case" description="Choose a test from the center panel to inspect execution history, failures, and quality trends." />;
   }
 
   const latestExecution = test.latest_execution || {};
+  const wrapperClass = embedded ? "space-y-0" : "surface-card rounded-3xl p-7 2xl:sticky 2xl:top-6";
 
   return (
-    <section className="surface-card rounded-3xl p-7 2xl:sticky 2xl:top-6">
+    <section className={wrapperClass}>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 pr-3">
           <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-app-muted">Selected Test</p>
