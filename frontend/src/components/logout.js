@@ -1,9 +1,9 @@
 import React from "react";
 import { Button } from "../components/button";
-import { invalidateCurrentUserCache } from "../hooks/useLoadUser";
 import { apiUrl } from "../utils/api";
 import { readResponseData } from "../utils/http";
-import { clearAccessToken, getAccessToken } from "../utils/tokenStore";
+import { completeLogout } from "../utils/sessionCoordinator";
+import { getAccessToken } from "../utils/tokenStore";
 
 function LogoutButton() {
   const hasToken = Boolean(getAccessToken());
@@ -15,9 +15,9 @@ function LogoutButton() {
         credentials: "include",
       });
       await readResponseData(response);
-      clearAccessToken();
-      invalidateCurrentUserCache();
-      //redirect to /login
+      completeLogout({
+        message: "Signed out successfully.",
+      });
       window.location.href = "/login";
     } catch (err) {
       console.error("Logout failed: ", err);

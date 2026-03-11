@@ -1,9 +1,9 @@
-import React, { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import React, { useEffect, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { Button } from "../components/button";
 import { apiUrl } from "../utils/api";
 import { getResponseMessage, readResponseData } from "../utils/http";
-import { setAccessToken } from "../utils/tokenStore";
+import { completeLogin } from "../utils/sessionCoordinator";
 
 function base64UrlToUint8Array(base64Url) {
   const padding = "=".repeat((4 - (base64Url.length % 4)) % 4);
@@ -51,10 +51,27 @@ function serializeAssertion(credential) {
 }
 
 function LoginForm() {
+  const navigate = useNavigate();
+  const location = useLocation();
   const [email, setEmail] = useState("");
   const [error, setError] = useState(null);
+  const [flash, setFlash] = useState(() => location.state?.flashMessage || null);
+  const [flashTone, setFlashTone] = useState(() => location.state?.flashTone || "success");
   const [loading, setLoading] = useState(false);
-  const navigate = useNavigate();
+  const flashMessage = location.state?.flashMessage || null;
+
+  useEffect(() => {
+    if (!flashMessage) {
+      return;
+    }
+
+    setFlash(flashMessage);
+    setFlashTone(location.state?.flashTone || "success");
+    navigate(location.pathname, {
+      replace: true,
+      state: {},
+    });
+  }, [flashMessage, location.pathname, location.state, navigate]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -113,7 +130,7 @@ function LoginForm() {
         throw new Error("Unexpected response from server");
       }
 
-      setAccessToken(data.access_token);
+      completeLogin(data.access_token);
       navigate("/dashboard");
     } catch (err) {
       setError(err.message);
@@ -137,6 +154,14 @@ function LoginForm() {
             {error}
           </p>
         )}
+        {flash && !error ? (
+          <p
+            className={`mb-4 text-center ${flashTone === "warning" ? "text-amber-500" : "text-emerald-600"}`}
+            role="status"
+          >
+            {flash}
+          </p>
+        ) : null}
 
         <form onSubmit={handleSubmit} className="space-y-5" aria-busy={loading}>
           <div>

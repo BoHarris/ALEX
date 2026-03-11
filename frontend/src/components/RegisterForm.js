@@ -1,8 +1,10 @@
 import React, { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Button } from "../components/button";
 import TextField from "../components/text_input";
 import { apiUrl } from "../utils/api";
 import { getResponseMessage, readResponseData } from "../utils/http";
+import { getRegistrationCompletionMessage } from "../utils/sessionCoordinator";
 
 function base64UrlToUint8Array(base64Url) {
   const padding = "=".repeat((4 - (base64Url.length % 4)) % 4);
@@ -56,6 +58,7 @@ function Register() {
   const [company_name, setCompanyName] = useState("");
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
+  const navigate = useNavigate();
 
   const handleRegister = async (event) => {
     event.preventDefault();
@@ -130,7 +133,15 @@ function Register() {
         throw new Error(msg);
       }
 
-      setMessage(data.message || "Passkey registered successfully.");
+      const successMessage = getRegistrationCompletionMessage();
+      setMessage(successMessage);
+      navigate("/login", {
+        replace: true,
+        state: {
+          flashMessage: successMessage,
+          flashTone: "success",
+        },
+      });
     } catch (err) {
       setMessage("Error registering passkey: " + err.message);
     } finally {

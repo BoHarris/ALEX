@@ -1,6 +1,6 @@
 import { apiUrl } from "./api";
-import { readResponseData } from "./http";
-import { clearAccessToken, getAccessToken, setAccessToken } from "./tokenStore";
+import { getAccessToken } from "./tokenStore";
+import { refreshSessionOrExpire } from "./session";
 
 export async function authFetch(path, options = {}) {
   let token = getAccessToken();
@@ -22,24 +22,11 @@ export async function authFetch(path, options = {}) {
     return response;
   }
 
-  const refreshResponse = await fetch(apiUrl("/auth/refresh"), {
-    method: "POST",
-    credentials: "include",
-  });
-
-  if (!refreshResponse.ok) {
-    clearAccessToken();
+  const recovered = await refreshSessionOrExpire();
+  if (!recovered) {
     throw new Error("Session expired. Please log in again.");
   }
 
-  const { data } = await readResponseData(refreshResponse);
-  if (!data?.access_token) {
-    clearAccessToken();
-    throw new Error("Session expired. Please log in again.");
-  }
-  setAccessToken(data.access_token);
-
-  token = data.access_token;
-
+  token = getAccessToken();
   return doRequest(token);
 }
