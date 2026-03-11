@@ -103,6 +103,44 @@ def _history_row(case: ComplianceTestCaseResult, run: ComplianceTestRun) -> dict
     }
 
 
+def _discovered_test_stub(discovered_test: dict[str, object]) -> dict[str, object]:
+    node_id = str(discovered_test["node_id"])
+    return {
+        "test_id": encode_test_id(node_id=node_id, test_name=str(discovered_test["test_name"])),
+        "test_node_id": node_id,
+        "test_name": str(discovered_test["test_name"]),
+        "category": str(discovered_test["category"]),
+        "suite_name": None,
+        "status": "not_run",
+        "description": discovered_test.get("description"),
+        "file_path": discovered_test.get("file_path"),
+        "file_name": discovered_test.get("file_path"),
+        "expected_result": None,
+        "actual_result": None,
+        "confidence_score": None,
+        "latest_environment": None,
+        "total_runs": 0,
+        "passed_runs": 0,
+        "failed_runs": 0,
+        "skipped_runs": 0,
+        "pass_rate": 0.0,
+        "flake_rate": 0.0,
+        "flaky": False,
+        "quality_label": "Not Run",
+        "average_duration_ms": None,
+        "last_duration_ms": None,
+        "last_run_timestamp": None,
+        "last_successful_run": None,
+        "last_failed_run": None,
+        "latest_failure_reason": None,
+        "current_pass_streak": 0,
+        "current_fail_streak": 0,
+        "trend": "not_run",
+        "history": [],
+        "latest_execution": None,
+    }
+
+
 def _compute_streak(history: list[dict[str, object]], target_status: str) -> int:
     streak = 0
     for item in history:
@@ -237,22 +275,27 @@ def _build_test_inventory(db: Session, *, organization_id: int) -> list[dict[str
     grouped: dict[str, list[tuple[ComplianceTestCaseResult, ComplianceTestRun]]] = defaultdict(list)
     for case, run in _query_test_rows(db, organization_id=organization_id):
         grouped[build_test_node_id(test_name=case.name, file_path=case.file_name, category=run.category)].append((case, run))
-    inventory_by_node_id = {
+    executed_inventory_by_node_id = {
         node_id: _summarize_test_history(node_id, rows)
         for node_id, rows in grouped.items()
     }
     discovered_by_node_id = {str(item["node_id"]): item for item in discover_pytest_cases()}
-    for node_id, current in inventory_by_node_id.items():
-        discovered_test = discovered_by_node_id.get(node_id)
-        if not discovered_test:
-            continue
-        if not current.get("description") and discovered_test.get("description"):
-            current["description"] = discovered_test["description"]
-        current["file_path"] = discovered_test["file_path"]
-        current["file_name"] = discovered_test["file_path"]
-        if current.get("category") in {None, "", "integration tests"}:
+    if discovered_by_node_id:
+        inventory_by_node_id: dict[str, dict[str, object]] = {}
+        for node_id, discovered_test in discovered_by_node_id.items():
+            current = executed_inventory_by_node_id.get(node_id)
+            if current is None:
+                inventory_by_node_id[node_id] = _discovered_test_stub(discovered_test)
+                continue
+            if not current.get("description") and discovered_test.get("description"):
+                current["description"] = discovered_test["description"]
+            current["file_path"] = discovered_test["file_path"]
+            current["file_name"] = discovered_test["file_path"]
             current["category"] = discovered_test["category"]
-    inventory = list(inventory_by_node_id.values())
+            inventory_by_node_id[node_id] = current
+        inventory = list(inventory_by_node_id.values())
+    else:
+        inventory = list(executed_inventory_by_node_id.values())
     return sorted(
         inventory,
         key=lambda item: (_status_rank(str(item["status"])), item["last_run_timestamp"] or "", str(item["file_path"] or ""), item["test_name"].lower()),

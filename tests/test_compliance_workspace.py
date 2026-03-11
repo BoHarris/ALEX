@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -28,6 +29,11 @@ from database.models.vendor import Vendor
 from database.models.wiki_page import WikiPage
 from routers import compliance_router
 from services.test_management_service import encode_test_id
+
+
+@pytest.fixture(autouse=True)
+def _stub_dashboard_discovery(monkeypatch):
+    monkeypatch.setattr("services.test_management_service.discover_pytest_cases", lambda: [])
 
 
 def _session():
@@ -752,6 +758,49 @@ def test_test_dashboard_backfills_missing_case_results_for_existing_runs():
     assert session.query(ComplianceTestCaseResult).filter(
         ComplianceTestCaseResult.test_run_id == run.id
     ).count() == 3
+
+
+def test_test_dashboard_discovers_pytest_cases_without_execution_history(monkeypatch):
+    session = _session()
+    _, _, employee = _seed_org(session)
+
+    monkeypatch.setattr(
+        "services.test_management_service.discover_pytest_cases",
+        lambda: [
+            {
+                "test_name": "test_detect_email",
+                "file_path": "tests/test_privacy_metrics.py",
+                "node_id": "tests/test_privacy_metrics.py::test_detect_email",
+                "description": "Email detection should be discoverable.",
+                "category": "privacy tests",
+            },
+            {
+                "test_name": "test_detect_phone",
+                "file_path": "tests/test_privacy_metrics.py",
+                "node_id": "tests/test_privacy_metrics.py::test_detect_phone",
+                "description": "Phone detection should be discoverable.",
+                "category": "privacy tests",
+            },
+        ],
+    )
+
+    dashboard = compliance_router.get_test_dashboard(
+        current_employee=_employee_context(employee),
+        db=session,
+    )
+    inventory = compliance_router.list_managed_test_inventory(
+        category="privacy tests",
+        current_employee=_employee_context(employee),
+        db=session,
+    )
+
+    assert dashboard["summary"]["total_tests"] == 2
+    assert dashboard["summary"]["not_run_tests"] == 2
+    assert inventory["summary"]["not_run"] == 2
+    assert {item["test_node_id"] for item in inventory["tests"]} == {
+        "tests/test_privacy_metrics.py::test_detect_email",
+        "tests/test_privacy_metrics.py::test_detect_phone",
+    }
 
 
 def test_compliance_overview_returns_attention_data():
