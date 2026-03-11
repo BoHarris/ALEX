@@ -17,11 +17,20 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("audit_events", sa.Column("event_category", sa.String(), nullable=True))
-    op.add_column("audit_events", sa.Column("event_metadata", sa.Text(), nullable=True))
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    existing_columns = {column["name"] for column in inspector.get_columns("audit_events")}
+    existing_indexes = {index["name"] for index in inspector.get_indexes("audit_events")}
+
+    if "event_category" not in existing_columns:
+        op.add_column("audit_events", sa.Column("event_category", sa.String(), nullable=True))
+    if "event_metadata" not in existing_columns:
+        op.add_column("audit_events", sa.Column("event_metadata", sa.Text(), nullable=True))
     op.execute("UPDATE audit_events SET event_category = 'system' WHERE event_category IS NULL")
-    op.alter_column("audit_events", "event_category", existing_type=sa.String(), nullable=False)
-    op.create_index("ix_audit_events_event_category", "audit_events", ["event_category"], unique=False)
+    with op.batch_alter_table("audit_events") as batch_op:
+        batch_op.alter_column("event_category", existing_type=sa.String(), nullable=False)
+    if "ix_audit_events_event_category" not in existing_indexes:
+        op.create_index("ix_audit_events_event_category", "audit_events", ["event_category"], unique=False)
 
 
 def downgrade() -> None:

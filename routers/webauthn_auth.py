@@ -78,6 +78,10 @@ class EmployeeWebAuthnRegisterOptionsRequest(BaseModel):
     email: str
 
 
+class EmployeeWebAuthnStatusRequest(BaseModel):
+    email: str
+
+
 class EmployeeWebAuthnRegisterVerifyRequest(BaseModel):
     email: str
     credential: dict
@@ -562,6 +566,29 @@ def employee_webauthn_register_options(
     )
     db.commit()
     return {"user_id": user.id, "options": _serialize_webauthn_value(options)}
+
+
+@router.post("/employee/webauthn/status")
+def employee_webauthn_status(
+    payload: EmployeeWebAuthnStatusRequest = Body(...),
+    db: Session = Depends(get_db),
+):
+    ensure_default_company_and_employee(db)
+    safe_email = _clean_required(payload.email, "email").lower()
+    employee = db.query(Employee).filter(Employee.email == safe_email).first()
+    if not employee:
+        return {
+            "employee_found": False,
+            "passkey_enrolled": False,
+            "is_active": False,
+        }
+
+    user = db.query(User).filter(User.id == employee.user_id).first() if employee.user_id else None
+    return {
+        "employee_found": True,
+        "passkey_enrolled": bool(user and user.webauthn_credential_id),
+        "is_active": employee.status == "active" and bool(user and user.is_active),
+    }
 
 
 @router.post("/employee/webauthn/register/verify")
