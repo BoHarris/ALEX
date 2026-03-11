@@ -8,9 +8,9 @@ import uuid
 import re
 import numpy as np
 import logging
-import joblib
 from utils.redaction import scan_and_redact_column_with_count
 from utils.constants import SUPPORTED_EXTENSIONS
+from services.scan_service import get_scan_model
 from PyPDF2 import PdfReader
 
 import mimetypes
@@ -19,8 +19,6 @@ import json
 import xml.etree.ElementTree as ET
 
 router = APIRouter(prefix="/predict", tags=["Prediction"])
-
-xgb_model = joblib.load("models/xgboost_model.pkl")
 
 EMAIL_RE = re.compile(r"[^@]+@[^@]+\.[^@]+")
 PHONE_RE = re.compile(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}")
@@ -151,7 +149,7 @@ async def predict(file: UploadFile = File(...)):
         "has_city_name", "has_known_name", "has_zip_pattern", "has_phone_pattern"
     ]
 
-    predictions = xgb_model.predict(X[feature_columns])
+    predictions = get_scan_model().predict(X[feature_columns])
     pii_columns = [col for col, is_pii in zip(features, predictions) if is_pii == 0]
 
     redacted_df = df.copy()

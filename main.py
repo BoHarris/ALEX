@@ -54,7 +54,7 @@ logging.basicConfig(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    run_startup_validations()
+    app.state.pii_model = run_startup_validations()
     
     yield
     

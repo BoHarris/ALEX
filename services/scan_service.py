@@ -8,6 +8,7 @@ import re
 import uuid
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import joblib
@@ -26,7 +27,9 @@ from utils.redaction import scan_and_redact_column_with_details
 
 logger = logging.getLogger(__name__)
 
-xgb_model = joblib.load("models/xgboost_model.pkl")
+BASE_DIR = Path(__file__).resolve().parent.parent
+MODEL_PATH = BASE_DIR / "models" / "xgboost_model.pkl"
+_xgb_model = None
 
 EMAIL_RE = re.compile(r"[^@]+@[^@]+\.[^@]+")
 PHONE_RE = re.compile(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}")
@@ -53,6 +56,36 @@ class ScanPipelineResult:
     total_values: int
     redacted_type_counts: dict[str, int]
     scan_id: int
+
+
+def _load_xgboost_model(model_path: Path = MODEL_PATH):
+    try:
+        return joblib.load(model_path)
+    except Exception as exc:
+        raise RuntimeError(
+            "StartupError: XGBoost model could not be loaded. "
+            "Verify model file exists and is compatible with current environment."
+        ) from exc
+
+
+def initialize_scan_model(model_path: Path = MODEL_PATH):
+    global _xgb_model
+    if _xgb_model is None:
+        _xgb_model = _load_xgboost_model(model_path)
+    return _xgb_model
+
+
+def set_scan_model(model) -> None:
+    global _xgb_model
+    _xgb_model = model
+
+
+def get_scan_model():
+    if _xgb_model is None:
+        raise RuntimeError(
+            "Scan model is not initialized. Startup validation must load the XGBoost model before scanning."
+        )
+    return _xgb_model
 
 
 def _contains_dob_pattern(values: list[str]) -> bool:
@@ -233,9 +266,10 @@ def _write_redacted_file(redacted_df: pd.DataFrame, redacted_path: str, ext: str
         redacted_df.to_csv(redacted_path, index=False)
 
 
-def _predict_pii_columns(df: pd.DataFrame) -> list[str]:
+def _predict_pii_columns(df: pd.DataFrame, model=None) -> list[str]:
     x, features = _build_feature_dataframe(df)
-    predictions = xgb_model.predict(
+    active_model = model or get_scan_model()
+    predictions = active_model.predict(
         x[
             [
                 "length",
@@ -375,6 +409,7 @@ def run_scan_pipeline(
     file_bytes: bytes,
     filename: str,
     context: ScanContext,
+    model=None,
     aggressive: bool = False,
 ) -> ScanPipelineResult:
     ext = os.path.splitext(filename)[1].lower()
@@ -384,7 +419,7 @@ def run_scan_pipeline(
     os.makedirs("redacted", exist_ok=True)
 
     df = _parse_to_dataframe(file_bytes=file_bytes, filename=filename, ext=ext)
-    pii_columns = _predict_pii_columns(df)
+    pii_columns = _predict_pii_columns(df, model=model)
     redacted_df, total_redacted, total_values, redacted_type_counts = _apply_redactions(
         df,
         pii_columns,

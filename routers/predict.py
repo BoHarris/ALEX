@@ -257,6 +257,7 @@ async def predict(
                 file_bytes=file_bytes,
                 filename=file.filename,
                 context=context,
+                model=getattr(request.app.state, "pii_model", None),
                 aggressive=aggressive,
             )
         )

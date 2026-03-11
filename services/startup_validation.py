@@ -30,6 +30,7 @@ from database.models.training_module import TrainingModule
 from database.models.vendor import Vendor
 from database.models.wiki_page import WikiPage
 from services.compliance_service import ensure_default_company_and_employee
+from services.scan_service import initialize_scan_model
 
 logger = logging.getLogger(__name__)
 
@@ -284,12 +285,15 @@ def _validate_directories() -> None:
 
 
 def _validate_assets() -> None:
-    if not MODEL_PATH.is_file():
-        raise RuntimeError(f"Model file not found at configured path: {MODEL_PATH}")
-
     if not FONT_PATH.is_file():
         raise RuntimeError(f"Required report asset not found at configured path: {FONT_PATH}")
     logger.info("Startup validation: required assets present.")
+
+
+def _validate_model_loading():
+    model = initialize_scan_model(MODEL_PATH)
+    logger.info("Startup validation: XGBoost model loaded successfully from %s", MODEL_PATH)
+    return model
 
 
 def _validate_pdf_support() -> None:
@@ -311,7 +315,7 @@ def _validate_pdf_support() -> None:
     )
 
 
-def run_startup_validations() -> None:
+def run_startup_validations():
     """
     Central startup validation entrypoint.
     Raises RuntimeError for blocking startup issues and logs warnings for optional capabilities.
@@ -334,5 +338,7 @@ def run_startup_validations() -> None:
         db.close()
     _validate_directories()
     _validate_assets()
+    model = _validate_model_loading()
     _validate_pdf_support()
     logger.info("Startup validation completed successfully.")
+    return model
