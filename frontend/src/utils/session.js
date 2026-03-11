@@ -1,29 +1,12 @@
-import { apiUrl } from "./api";
-import { readResponseData } from "./http";
-import { clearAccessToken, setAccessToken } from "./tokenStore";
+import { bootstrapSession, recoverSession } from "./sessionCoordinator";
 
 export async function rehydrateSession() {
-  try {
-    const response = await fetch(apiUrl("/auth/refresh"), {
-      method: "POST",
-      credentials: "include",
-    });
+  return bootstrapSession();
+}
 
-    if (!response.ok) {
-      clearAccessToken();
-      return false;
-    }
-
-    const { data } = await readResponseData(response);
-    if (!data?.access_token) {
-      clearAccessToken();
-      return false;
-    }
-
-    setAccessToken(data.access_token);
-    return true;
-  } catch {
-    clearAccessToken();
-    return false;
-  }
+export async function refreshSessionOrExpire() {
+  return recoverSession({
+    failureMode: "expired",
+    broadcastSuccess: true,
+  });
 }

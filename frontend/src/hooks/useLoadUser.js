@@ -1,18 +1,23 @@
 import { useState, useEffect } from "react";
 import { authFetch } from "../utils/authFetch";
+import {
+  getCachedUser,
+  getCachedUserPromise,
+  invalidateCurrentUserCache,
+  isCurrentUserCacheInitialized,
+  setCachedUser,
+  setCachedUserPromise,
+} from "../utils/currentUserCache";
 import { readResponseData } from "../utils/http";
 import { getAccessToken } from "../utils/tokenStore";
 
-let cachedUser = null;
-let cachedUserPromise = null;
-let cacheInitialized = false;
-
 async function fetchCurrentUser() {
-  if (cachedUserPromise) {
-    return cachedUserPromise;
+  const existingPromise = getCachedUserPromise();
+  if (existingPromise) {
+    return existingPromise;
   }
 
-  cachedUserPromise = (async () => {
+  const nextPromise = (async () => {
     const res = await authFetch("/protected/me");
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}`);
@@ -22,22 +27,16 @@ async function fetchCurrentUser() {
     if (!data) {
       throw new Error("Unexpected response from server");
     }
-    cachedUser = data;
-    cacheInitialized = true;
+    setCachedUser(data);
     return data;
   })();
+  setCachedUserPromise(nextPromise);
 
   try {
-    return await cachedUserPromise;
+    return await nextPromise;
   } finally {
-    cachedUserPromise = null;
+    setCachedUserPromise(null);
   }
-}
-
-export function invalidateCurrentUserCache() {
-  cachedUser = null;
-  cachedUserPromise = null;
-  cacheInitialized = false;
 }
 
 export function useCurrentUser() {
@@ -62,9 +61,9 @@ export function useCurrentUser() {
           return;
         }
 
-        if (cacheInitialized && reloadKey === 0) {
+        if (isCurrentUserCacheInitialized() && reloadKey === 0) {
           if (mounted) {
-            setUser(cachedUser);
+            setUser(getCachedUser());
             setLoading(false);
           }
           return;
