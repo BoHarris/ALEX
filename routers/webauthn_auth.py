@@ -1,6 +1,7 @@
 import os
 import secrets
 import dataclasses
+import logging
 from datetime import timedelta, datetime, timezone
 from enum import Enum
 
@@ -18,6 +19,7 @@ from services.audit_service import record_audit_event
 from services.compliance_service import ensure_default_company_and_employee
 from services.refresh_session_service import issue_bound_refresh_token
 from services.security_service import enforce_auth_rate_limit, extract_request_security_context, register_failed_login
+from services.security_state_store import SecurityStateStoreError
 from utils.auth_utils import create_access_token, ensure_user_is_active
 from utils.api_errors import error_payload
 from utils.rbac import ROLE_ORG_ADMIN, ROLE_USER, normalize_role
@@ -37,6 +39,7 @@ from webauthn.helpers.structs import (
 )
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+logger = logging.getLogger(__name__)
 
 ACCESS_TOKEN_TTL = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15"))
 REFRESH_TOKEN_TTL = int(os.getenv("REFRESH_TOKEN_EXPIRE_MINUTES", "10080"))
@@ -677,13 +680,17 @@ def webauthn_register_verify(
         )
     except Exception:
         request_context = extract_request_security_context(request)
-        register_failed_login(
-            db,
-            email=registration.email,
-            organization_id=registration.company_id,
-            user_id=None,
-            context=request_context,
-        )
+        _delete_pending_registration(db, registration.id)
+        try:
+            register_failed_login(
+                db,
+                email=registration.email,
+                organization_id=registration.company_id,
+                user_id=None,
+                context=request_context,
+            )
+        except SecurityStateStoreError:
+            logger.exception("Failed-login tracking unavailable during registration verification failure.")
         record_audit_event(
             db,
             company_id=registration.company_id,
@@ -696,7 +703,6 @@ def webauthn_register_verify(
             request_context=request_context,
         )
         db.commit()
-        _delete_pending_registration(db, registration.id)
         raise HTTPException(
             status_code=400,
             detail=error_payload(

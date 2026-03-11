@@ -197,6 +197,7 @@ def _increment_threshold_counter(
     state_key: str,
     threshold: int,
     window_seconds: int,
+    inclusive: bool = True,
 ) -> bool:
     count = increment_counter(
         db,
@@ -204,7 +205,7 @@ def _increment_threshold_counter(
         state_key=state_key,
         window_seconds=window_seconds,
     )
-    return count >= threshold
+    return count >= threshold if inclusive else count > threshold
 
 
 def _track_ip_identity(
@@ -325,6 +326,7 @@ def enforce_auth_rate_limit(
                 state_key=_hash_state_identifier(raw_key) or "unknown",
                 threshold=threshold,
                 window_seconds=window_seconds,
+                inclusive=False,
             )
             if threshold_hit:
                 raise HTTPException(
