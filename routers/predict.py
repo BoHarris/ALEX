@@ -1,6 +1,6 @@
 import logging
-import io
 import os
+import tempfile
 import uuid
 import zipfile
 from functools import partial
@@ -15,7 +15,7 @@ from database.models.company_settings import CompanySettings
 from dependencies.tier_guard import get_current_user_context
 from services.audit_service import record_audit_event
 from services.security_service import extract_request_security_context, register_scan_activity
-from services.scan_service import ScanContext, run_scan_pipeline
+from services.scan_service import ScanContext, ScanLimitError, run_scan_pipeline
 from utils.tier_limiter import release_scan_quota_reservation, reserve_scan_quota
 from utils.constants import SUPPORTED_EXTENSIONS
 from utils.api_errors import error_payload
@@ -43,30 +43,75 @@ def _is_text_payload(file_bytes: bytes) -> bool:
             return False
 
 
-def _passes_content_signature_check(file_bytes: bytes, ext: str) -> bool:
-    if not file_bytes:
+def _passes_content_signature_check(*, sample_bytes: bytes, source_path: str, ext: str) -> bool:
+    if not sample_bytes:
         return False
 
     lowered_ext = ext.lower()
 
     if lowered_ext == ".pdf":
-        return file_bytes.startswith(b"%PDF-")
+        return sample_bytes.startswith(b"%PDF-")
     if lowered_ext in {".xlsx", ".docx"}:
-        return zipfile.is_zipfile(io.BytesIO(file_bytes))
+        return zipfile.is_zipfile(source_path)
     if lowered_ext == ".xls":
-        return file_bytes.startswith(b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1")
+        return sample_bytes.startswith(b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1")
     if lowered_ext == ".json":
-        stripped = file_bytes.lstrip()
+        stripped = sample_bytes.lstrip()
         return stripped.startswith(b"{") or stripped.startswith(b"[")
     if lowered_ext == ".xml":
-        return file_bytes.lstrip().startswith(b"<")
+        return sample_bytes.lstrip().startswith(b"<")
     if lowered_ext == ".html":
-        lowered = file_bytes[:4096].lower()
+        lowered = sample_bytes[:4096].lower()
         return b"<html" in lowered or b"<!doctype html" in lowered
     if lowered_ext in {".csv", ".tsv", ".txt", ".log"}:
-        return _is_text_payload(file_bytes)
+        return _is_text_payload(sample_bytes)
 
     return False
+
+
+async def _stream_upload_to_tempfile(
+    file: UploadFile,
+    *,
+    suffix: str,
+    max_file_size_bytes: int,
+    max_file_size_mb: int,
+) -> tuple[str, int, bytes]:
+    os.makedirs("uploads", exist_ok=True)
+    sample = bytearray()
+    total_size = 0
+    chunk_size = 1024 * 1024
+    temp_handle = tempfile.NamedTemporaryFile(delete=False, dir="uploads", suffix=suffix)
+    temp_path = temp_handle.name
+
+    try:
+        while True:
+            chunk = await file.read(chunk_size)
+            if not chunk:
+                break
+
+            total_size += len(chunk)
+            if total_size > max_file_size_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail=error_payload(
+                        detail=f"File exceeds {max_file_size_mb}MB plan limit.",
+                        error_code="file_too_large",
+                    ),
+                )
+
+            if len(sample) < 4096:
+                remaining = 4096 - len(sample)
+                sample.extend(chunk[:remaining])
+
+            temp_handle.write(chunk)
+    except Exception:
+        temp_handle.close()
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise
+
+    temp_handle.close()
+    return temp_path, total_size, bytes(sample)
 
 
 def _company_allowed_extensions(db: Session, company_id: int | None) -> set[str] | None:
@@ -154,7 +199,7 @@ async def predict(
         try:
             if int(content_length) > max_file_size_bytes:
                 raise HTTPException(
-                    status_code=400,
+                    status_code=413,
                     detail=error_payload(
                         detail=f"File exceeds {max_file_size_mb}MB plan limit.",
                         error_code="file_too_large",
@@ -173,26 +218,6 @@ async def predict(
             ),
         )
 
-    file_bytes = await file.read()
-    file_size = len(file_bytes)
-    if file_size > max_file_size_bytes:
-        raise HTTPException(
-            status_code=400,
-            detail=error_payload(
-                detail=f"File exceeds {max_file_size_mb}MB plan limit.",
-                error_code="file_too_large",
-            ),
-        )
-
-    if not _passes_content_signature_check(file_bytes, ext):
-        raise HTTPException(
-            status_code=400,
-            detail=error_payload(
-                detail="Unsupported or invalid file signature.",
-                error_code="unsupported_file_type",
-            ),
-        )
-
     user_id = user_info.get("user_id")
     if user_id is None:
         raise HTTPException(
@@ -204,8 +229,27 @@ async def predict(
         )
 
     reserved_quota = False
+    temp_path = None
     request_context = extract_request_security_context(request)
     try:
+        temp_path, _, file_signature_sample = await _stream_upload_to_tempfile(
+            file,
+            suffix=ext,
+            max_file_size_bytes=max_file_size_bytes,
+            max_file_size_mb=max_file_size_mb,
+        )
+        if not _passes_content_signature_check(
+            sample_bytes=file_signature_sample,
+            source_path=temp_path,
+            ext=ext,
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=error_payload(
+                    detail="Unsupported or invalid file signature.",
+                    error_code="unsupported_file_type",
+                ),
+            )
         record_audit_event(
             db,
             company_id=user_info.get("company_id"),
@@ -254,7 +298,7 @@ async def predict(
         result = await run_in_threadpool(
             partial(
                 run_scan_pipeline,
-                file_bytes=file_bytes,
+                source_path=temp_path,
                 filename=file.filename,
                 context=context,
                 model=getattr(request.app.state, "pii_model", None),
@@ -284,6 +328,29 @@ async def predict(
             total_values=result.total_values,
             redaction_summary=result.redacted_type_counts,
         )
+    except ScanLimitError as exc:
+        if reserved_quota:
+            release_scan_quota_reservation(db, user_id)
+        record_audit_event(
+            db,
+            company_id=user_info.get("company_id"),
+            user_id=int(user_id),
+            event_type="scan_failed",
+            event_category="scan",
+            description="A scan request exceeded configured processing limits.",
+            target_type="user",
+            target_id=str(user_id),
+            request_context=request_context,
+            event_metadata={"reason": exc.detail, "error_code": exc.error_code},
+        )
+        db.commit()
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=error_payload(
+                detail=exc.detail,
+                error_code=exc.error_code.lower(),
+            ),
+        ) from exc
     except ValueError as exc:
         if reserved_quota:
             release_scan_quota_reservation(db, user_id)
@@ -371,3 +438,6 @@ async def predict(
                 error_id=error_id,
             ),
         ) from exc
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
