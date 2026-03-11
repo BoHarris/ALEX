@@ -1,12 +1,45 @@
-export default function DetailDrawer({ open, title, subtitle, onClose, children, widthClass = "max-w-2xl" }) {
+import { useEffect } from "react";
+
+export default function DetailDrawer({
+  open,
+  title,
+  subtitle,
+  onClose,
+  children,
+  widthClass = "max-w-2xl",
+  side = "right",
+  containerClass = "",
+  panelClass = "",
+}) {
+  useEffect(() => {
+    if (!open) {
+      return undefined;
+    }
+
+    function handleKeyDown(event) {
+      if (event.key === "Escape") {
+        onClose?.();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [open, onClose]);
+
   if (!open) {
     return null;
   }
 
+  const isLeft = side === "left";
+  const alignmentClass = isLeft ? "justify-start" : "justify-end";
+  const panelBorderClass = isLeft ? "border-r" : "border-l";
+  const overlayButtonOrder = isLeft ? "order-2" : "order-1";
+  const panelOrder = isLeft ? "order-1" : "order-2";
+
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-slate-950/55 backdrop-blur-sm" role="dialog" aria-modal="true" aria-label={title}>
-      <button type="button" className="h-full flex-1 cursor-default" aria-label="Close drawer overlay" onClick={onClose} />
-      <aside className={`h-full w-full ${widthClass} overflow-y-auto border-l border-app bg-app px-6 py-6 shadow-2xl`}>
+    <div className={`fixed inset-0 z-50 flex ${alignmentClass} bg-slate-950/45 backdrop-blur-sm ${containerClass}`} role="dialog" aria-modal="true" aria-label={title}>
+      <button type="button" className={`h-full flex-1 cursor-default ${overlayButtonOrder}`} aria-label="Close drawer overlay" onClick={onClose} />
+      <aside className={`${panelOrder} h-full w-full ${widthClass} overflow-y-auto ${panelBorderClass} border-app bg-app px-6 py-6 shadow-2xl ${panelClass}`}>
         <div className="flex items-start justify-between gap-4">
           <div>
             <h2 className="text-2xl font-semibold text-app">{title}</h2>

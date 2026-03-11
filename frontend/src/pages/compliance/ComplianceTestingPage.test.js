@@ -204,3 +204,21 @@ test("supports selecting a single test case and filtering by search and file pat
     );
   });
 });
+
+test("opens a run history drawer for the selected test and supports closing it", async () => {
+  const user = userEvent.setup();
+  render(<ComplianceTestingPage />);
+
+  await user.click(screen.getByText("test_detect_email"));
+
+  expect(screen.getByRole("dialog", { name: "test_detect_email" })).toBeInTheDocument();
+  expect(screen.getByText("Run History Inspector")).toBeInTheDocument();
+  expect(screen.getByText("Detector missed expected email classification.")).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Close" }));
+
+  await waitFor(() => {
+    expect(screen.queryByRole("dialog", { name: "test_detect_email" })).not.toBeInTheDocument();
+  });
+  expect(screen.getByText("Selected Test")).toBeInTheDocument();
+});

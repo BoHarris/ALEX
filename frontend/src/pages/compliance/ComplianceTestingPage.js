@@ -4,6 +4,7 @@ import WorkspaceEmptyState from "../../components/compliance/WorkspaceEmptyState
 import TestCategoryRail from "../../components/compliance/testing/TestCategoryRail";
 import TestDetailPanel from "../../components/compliance/testing/TestDetailPanel";
 import TestInventoryTable from "../../components/compliance/testing/TestInventoryTable";
+import TestingRunHistoryDrawer from "../../components/compliance/testing/TestingRunHistoryDrawer";
 import { useCompliancePageContext } from "./useCompliancePageContext";
 import { formatDateTime, formatPercent, statusBadgeClass } from "./utils";
 
@@ -37,6 +38,8 @@ export default function ComplianceTestingPage() {
   const [statusFilter, setStatusFilter] = useState("");
   const [sort, setSort] = useState("last_run");
   const [interactionError, setInteractionError] = useState(null);
+  const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
+  const [historyDrawerTest, setHistoryDrawerTest] = useState(null);
 
   const dashboard = testDashboard || { summary: null, categories: [] };
   const categories = useMemo(() => dashboard.categories || [], [dashboard.categories]);
@@ -93,11 +96,15 @@ export default function ComplianceTestingPage() {
   async function handleSelectTest(test) {
     try {
       setInteractionError(null);
+      setHistoryDrawerTest(test);
+      setHistoryDrawerOpen(true);
       await loadTestCase(test.test_id);
     } catch (err) {
       setInteractionError(err.message);
     }
   }
+
+  const activeDrawerTest = selectedTestCase?.test_id === historyDrawerTest?.test_id ? selectedTestCase : historyDrawerTest;
 
   return (
     <div className="mx-auto max-w-[1720px] space-y-6 px-1">
@@ -116,7 +123,13 @@ export default function ComplianceTestingPage() {
         </div>
       ) : null}
 
-      <div className="grid gap-6 xl:grid-cols-[300px_minmax(0,1fr)] 2xl:grid-cols-[300px_minmax(0,1.12fr)_minmax(420px,0.94fr)]">
+      <TestingRunHistoryDrawer
+        open={historyDrawerOpen}
+        test={activeDrawerTest}
+        onClose={() => setHistoryDrawerOpen(false)}
+      />
+
+      <div className="grid gap-6 xl:grid-cols-[300px_minmax(0,1fr)] 2xl:grid-cols-[300px_minmax(0,0.92fr)_minmax(560px,1.12fr)]">
         <TestCategoryRail
           categories={categories}
           selectedCategory={selectedCategory}
@@ -149,7 +162,7 @@ export default function ComplianceTestingPage() {
               </div>
 
               <div className="mt-6 rounded-2xl border border-app/70 bg-app/20 p-4">
-                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-[minmax(0,1.25fr)_minmax(0,0.95fr)_150px_150px]">
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_140px_140px]">
                 <label className="min-w-0 flex flex-col gap-2 text-sm text-app-secondary">
                   <span className="text-xs font-semibold uppercase tracking-[0.18em] text-app-muted">Search Tests</span>
                   <input
