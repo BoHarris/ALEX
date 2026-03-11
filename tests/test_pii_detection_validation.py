@@ -4,10 +4,18 @@ import json
 from pathlib import Path
 
 import pandas as pd
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
+from database.database import Base
+from database.models.compliance_test_case_result import ComplianceTestCaseResult
+from database.models.compliance_test_run import ComplianceTestRun
+from database.models.company import Company
 from database.models.scan_results import ScanResult
 from services import scan_service
 from services.audit_report_service import generate_audit_report_html
+from services.test_metrics_service import create_tracked_test_run, track_test_execution
 from utils import redaction
 from utils.pii_taxonomy import GDPR_PERSONAL_DATA, PII_EMAIL, PII_PHONE
 
@@ -37,6 +45,16 @@ def _load_validation_cases() -> dict:
 
 def _detect(frame: pd.DataFrame):
     return scan_service._predict_pii_columns(frame, model=_HeuristicModel())
+
+
+def _tracking_session():
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(bind=engine, tables=[Company.__table__, ComplianceTestRun.__table__, ComplianceTestCaseResult.__table__])
+    return sessionmaker(bind=engine, autocommit=False, autoflush=False)()
 
 
 def test_email_detection_includes_explainable_signals():
@@ -159,3 +177,36 @@ def test_redactions_include_taxonomy_placeholder(monkeypatch):
     assert redacted_count == 1
     assert total_values == 1
     assert type_counts[PII_EMAIL] == 1
+
+
+def test_validation_suite_can_record_individual_detection_result():
+    session = _tracking_session()
+    company = Company(company_name="Acme")
+    session.add(company)
+    session.commit()
+
+    run = create_tracked_test_run(
+        session,
+        organization_id=company.id,
+        category="privacy tests",
+        suite_name="PII validation suite",
+        dataset_name="synthetic_pii_validation",
+    )
+    tracked = track_test_execution(
+        session,
+        test_run_id=run.id,
+        test_name="detect_email",
+        dataset_name="synthetic_pii_validation",
+        expected_result=PII_EMAIL,
+        actual_result=PII_EMAIL,
+        confidence_score=0.98,
+        file_name="tests/fixtures/pii_detection_validation_cases.json",
+        description="Synthetic email detection validation",
+    )
+    session.commit()
+    session.refresh(run)
+
+    assert tracked.result.status == "passed"
+    assert run.total_tests == 1
+    assert run.passed_tests == 1
+    assert float(run.accuracy_score) == 1.0

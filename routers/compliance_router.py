@@ -44,6 +44,13 @@ from services.compliance_service import (
     serialize_employee,
     update_record_status,
 )
+from services.test_metrics_service import (
+    compute_test_metrics,
+    create_tracked_test_run,
+    list_test_results as query_test_results,
+    list_test_runs as query_test_runs,
+    record_test_result,
+)
 from utils.api_errors import error_payload
 
 router = APIRouter(prefix="/compliance", tags=["Compliance Workspace"])
@@ -161,6 +168,46 @@ def _safe_json(value: str | None):
         return value
 
 
+def _serialize_test_run(run: ComplianceTestRun) -> dict:
+    return {
+        "id": run.id,
+        "suite_name": run.suite_name,
+        "category": run.category,
+        "dataset_name": run.dataset_name,
+        "status": run.status,
+        "total_tests": run.total_tests,
+        "passed_tests": run.passed_tests,
+        "failed_tests": run.failed_tests,
+        "skipped_tests": run.skipped_tests,
+        "accuracy_score": float(run.accuracy_score) if run.accuracy_score is not None else None,
+        "coverage_percent": float(run.coverage_percent) if run.coverage_percent is not None else None,
+        "report_link": run.report_link,
+        "run_at": run.run_at.isoformat() if run.run_at else None,
+    }
+
+
+def _serialize_test_case(case: ComplianceTestCaseResult, run: ComplianceTestRun | None = None) -> dict:
+    payload = {
+        "id": case.id,
+        "test_name": case.name,
+        "dataset_name": case.dataset_name,
+        "status": case.status,
+        "description": case.description,
+        "file_name": case.file_name,
+        "expected_result": case.expected_result,
+        "actual_result": case.actual_result,
+        "confidence_score": float(case.confidence_score) if case.confidence_score is not None else None,
+        "duration_ms": case.duration_ms,
+        "last_run_timestamp": case.last_run_at.isoformat() if case.last_run_at else None,
+        "output_summary": case.output,
+        "error_details": case.error_message,
+    }
+    if run is not None:
+        payload["category"] = run.category
+        payload["suite_name"] = run.suite_name
+    return payload
+
+
 def _serialize_audit_log(event: AuditLog, employee_lookup: dict[int, Employee]) -> dict:
     employee = employee_lookup.get(event.user_id) if event.user_id is not None else None
     actor_name = None
@@ -236,8 +283,23 @@ class TestRunCreateRequest(BaseModel):
     category: str
     suite_name: str
     status: str
+    dataset_name: str | None = None
     coverage_percent: Decimal | None = None
     report_link: str | None = None
+
+
+class TestResultCreateRequest(BaseModel):
+    test_name: str
+    dataset_name: str | None = None
+    file_name: str | None = None
+    description: str | None = None
+    expected_result: str | None = None
+    actual_result: str | None = None
+    status: str
+    confidence_score: Decimal | None = None
+    duration_ms: int | None = None
+    output: str | None = None
+    error_message: str | None = None
 
 
 class AccessReviewCreateRequest(WorkflowPayload):
@@ -930,16 +992,7 @@ def get_test_dashboard(current_employee: dict = Depends(require_compliance_works
     runs = db.query(ComplianceTestRun).filter(ComplianceTestRun.organization_id == current_employee["organization_id"]).order_by(ComplianceTestRun.run_at.desc()).all()
     grouped: dict[str, list[dict]] = {}
     for run in runs:
-        grouped.setdefault(run.category, []).append(
-            {
-                "id": run.id,
-                "suite_name": run.suite_name,
-                "status": run.status,
-                "coverage_percent": float(run.coverage_percent) if run.coverage_percent is not None else None,
-                "report_link": run.report_link,
-                "run_at": run.run_at.isoformat() if run.run_at else None,
-            }
-        )
+        grouped.setdefault(run.category, []).append(_serialize_test_run(run))
     return {"categories": grouped}
 
 
@@ -968,21 +1021,10 @@ def get_test_category_detail(category_name: str, current_employee: dict = Depend
             "skipped": skipped,
             "pass_rate": round((passing / total) * 100, 2) if total else 0,
             "last_run_timestamp": latest_run.run_at.isoformat() if latest_run.run_at else None,
+            "accuracy_score": float(latest_run.accuracy_score) if latest_run.accuracy_score is not None else None,
+            "dataset_name": latest_run.dataset_name,
         },
-        "tests": [
-            {
-                "id": case.id,
-                "test_name": case.name,
-                "status": case.status,
-                "description": case.description,
-                "file_name": case.file_name,
-                "duration_ms": case.duration_ms,
-                "last_run_timestamp": case.last_run_at.isoformat() if case.last_run_at else None,
-                "output_summary": case.output,
-                "error_details": case.error_message,
-            }
-            for case in cases
-        ],
+        "tests": [_serialize_test_case(case, latest_run) for case in cases],
     }
 
 
@@ -997,34 +1039,115 @@ def get_test_case_detail(case_id: int, current_employee: dict = Depends(require_
     if not case:
         raise HTTPException(status_code=404, detail=error_payload(detail="Test case not found", error_code="not_found"))
     result, run = case
-    return {
-        "id": result.id,
-        "test_name": result.name,
-        "category": run.category,
-        "suite_name": run.suite_name,
-        "status": result.status,
-        "description": result.description,
-        "file_name": result.file_name,
-        "duration_ms": result.duration_ms,
-        "last_execution_time": result.last_run_at.isoformat() if result.last_run_at else None,
-        "output": result.output,
-        "error_message": result.error_message,
-    }
+    payload = _serialize_test_case(result, run)
+    payload["last_execution_time"] = payload.pop("last_run_timestamp")
+    payload["output"] = payload.pop("output_summary")
+    payload["error_message"] = payload.pop("error_details")
+    return payload
 
 
 @router.post("/tests/runs")
 def create_test_run(payload: TestRunCreateRequest, current_employee: dict = Depends(require_security_or_compliance_admin), db: Session = Depends(get_db)):
-    run = ComplianceTestRun(
+    run = create_tracked_test_run(
+        db,
         organization_id=current_employee["organization_id"],
         category=payload.category,
         suite_name=payload.suite_name,
         status=payload.status,
+        dataset_name=payload.dataset_name,
         coverage_percent=payload.coverage_percent,
         report_link=payload.report_link,
     )
-    db.add(run)
     db.commit()
-    return {"id": run.id}
+    return _serialize_test_run(run)
+
+
+@router.post("/tests/runs/{run_id}/results")
+def create_test_result(
+    run_id: int,
+    payload: TestResultCreateRequest,
+    current_employee: dict = Depends(require_security_or_compliance_admin),
+    db: Session = Depends(get_db),
+):
+    run = db.query(ComplianceTestRun).filter(
+        ComplianceTestRun.id == run_id,
+        ComplianceTestRun.organization_id == current_employee["organization_id"],
+    ).first()
+    if not run:
+        raise HTTPException(status_code=404, detail=error_payload(detail="Test run not found", error_code="not_found"))
+
+    result = record_test_result(
+        db,
+        test_run_id=run.id,
+        test_name=payload.test_name,
+        dataset_name=payload.dataset_name or run.dataset_name,
+        expected_result=payload.expected_result,
+        actual_result=payload.actual_result,
+        status=payload.status,
+        confidence_score=float(payload.confidence_score) if payload.confidence_score is not None else None,
+        file_name=payload.file_name,
+        description=payload.description,
+        duration_ms=payload.duration_ms,
+        output=payload.output,
+        error_message=payload.error_message,
+    )
+    db.commit()
+    return _serialize_test_case(result, run)
+
+
+@router.get("/tests/results")
+def list_test_results(
+    limit: int = Query(default=50, ge=1, le=200),
+    dataset_name: str | None = Query(default=None),
+    test_name: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    current_employee: dict = Depends(require_compliance_workspace_access),
+    db: Session = Depends(get_db),
+):
+    rows = query_test_results(
+        db,
+        organization_id=current_employee["organization_id"],
+        limit=limit,
+        dataset_name=dataset_name,
+        test_name=test_name,
+        status=status,
+    )
+    return {
+        "results": [_serialize_test_case(result, run) for result, run in rows]
+    }
+
+
+@router.get("/tests/runs")
+def list_test_runs(
+    limit: int = Query(default=25, ge=1, le=100),
+    dataset_name: str | None = Query(default=None),
+    suite_name: str | None = Query(default=None),
+    current_employee: dict = Depends(require_compliance_workspace_access),
+    db: Session = Depends(get_db),
+):
+    runs = query_test_runs(
+        db,
+        organization_id=current_employee["organization_id"],
+        limit=limit,
+        dataset_name=dataset_name,
+        suite_name=suite_name,
+    )
+    return {"runs": [_serialize_test_run(run) for run in runs]}
+
+
+@router.get("/tests/metrics")
+def get_test_metrics(
+    dataset_name: str | None = Query(default=None),
+    current_employee: dict = Depends(require_compliance_workspace_access),
+    db: Session = Depends(get_db),
+):
+    metrics = compute_test_metrics(
+        db,
+        organization_id=current_employee["organization_id"],
+        dataset_name=dataset_name,
+    )
+    metrics["dataset_name"] = dataset_name
+    return metrics
 
 
 @router.post("/access-reviews")
