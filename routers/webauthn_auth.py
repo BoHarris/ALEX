@@ -18,7 +18,7 @@ from database.models.webauthn_challenge import WebAuthnChallenge
 from services.audit_service import record_audit_event
 from services.compliance_service import ensure_default_company_and_employee
 from services.security_service import extract_request_security_context, register_failed_login
-from utils.auth_utils import create_access_token
+from utils.auth_utils import create_access_token, ensure_user_is_active
 from utils.api_errors import error_payload
 from utils.rbac import ROLE_ORG_ADMIN, ROLE_USER, normalize_role
 
@@ -231,6 +231,11 @@ def _clean_required(value: str | None, field: str) -> str:
 def _clean_optional(value: str | None) -> str | None:
     text = (value or "").strip()
     return text if text else None
+
+
+def _ensure_authenticating_user_is_active(user: User) -> None:
+    # Authentication must stop immediately for deactivated accounts.
+    ensure_user_is_active(user)
 
 
 def _resolve_company_membership(
@@ -659,6 +664,7 @@ def webauthn_login_options(
                 error_code="validation_error",
             ),
         )
+    _ensure_authenticating_user_is_active(user)
 
     options = generate_authentication_options(
         rp_id=RP_ID,
@@ -735,6 +741,7 @@ def webauthn_login_verify(
                 error_code="unauthorized",
             ),
         )
+    _ensure_authenticating_user_is_active(user)
 
     expected_challenge_b64 = _get_valid_challenge(db, user.id,"login")
     if not expected_challenge_b64:
@@ -858,6 +865,7 @@ def employee_webauthn_login_options(
             status_code=400,
             detail=error_payload(detail="No passkey enrolled for this employee account", error_code="validation_error"),
         )
+    _ensure_authenticating_user_is_active(user)
     options = generate_authentication_options(
         rp_id=RP_ID,
         user_verification=UserVerificationRequirement.PREFERRED,
@@ -892,6 +900,7 @@ def employee_webauthn_login_verify(
             status_code=400,
             detail=error_payload(detail="Invalid employee login", error_code="unauthorized"),
         )
+    _ensure_authenticating_user_is_active(user)
     expected_challenge_b64 = _get_valid_challenge(db, user.id, "employee_login")
     if not expected_challenge_b64:
         raise HTTPException(

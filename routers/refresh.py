@@ -7,7 +7,7 @@ from database.database import get_db
 from database.models.user import User
 from services.audit_service import record_audit_event
 from services.security_service import extract_request_security_context, register_token_issue
-from utils.auth_utils import create_access_token, decode_refresh_token_with_error
+from utils.auth_utils import create_access_token, decode_refresh_token_with_error, ensure_user_is_active
 from utils.api_errors import error_payload
 from utils.rbac import normalize_role
 
@@ -98,6 +98,24 @@ def refresh_access_token(
                 error_code="invalid_token",
             ),
         )
+    if not user.is_active:
+        register_token_issue(
+            db,
+            organization_id=user.company_id,
+            user_id=user.id,
+            token_issue="inactive_user",
+            context=extract_request_security_context(request),
+        )
+        user.refresh_version = int(getattr(user, "refresh_version", 0)) + 1
+        db.add(user)
+        db.commit()
+        response.delete_cookie(
+            key="refresh_token",
+            httponly=True,
+            samesite="strict",
+            secure=IS_PROD,
+        )
+        ensure_user_is_active(user)
     
     #refresh token revocation check
     current_ver = int(getattr(user, "refresh_version", 0))
