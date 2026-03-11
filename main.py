@@ -14,8 +14,7 @@ from routers.admin_router import router as admin_router
 from routers.compliance_router import router as compliance_router
 from routers.webauthn_auth import router as webauthn_auth_router
 
-from routers.predict import router as predict_router
-from routers.redacted_router import router as redacted_router
+from routers.scans import router as scans_router
 
 from database.models.company import Company  # noqa: F401
 from database.models.user import User 
@@ -54,7 +53,7 @@ logging.basicConfig(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    run_startup_validations()
+    app.state.pii_model = run_startup_validations()
     
     yield
     
@@ -90,10 +89,9 @@ app.include_router(webauthn_auth_router)
 #existing routers
 app.include_router(protected.router)
 app.include_router(protected.companies_router)
-app.include_router(predict_router)
 app.include_router(logout.router)
 app.include_router(refresh.router)
-app.include_router(redacted_router)
+app.include_router(scans_router)
 app.include_router(admin_router)
 app.include_router(compliance_router)
 

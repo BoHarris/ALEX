@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from database.database import get_db
 from database.models.user import User
 from services.security_service import extract_request_security_context, register_token_issue
-from utils.auth_utils import decode_token_with_error
+from utils.auth_utils import decode_token_with_error, ensure_user_is_active
 from utils.tier_limiter import has_remaining_scan_quota
 from utils.api_errors import error_payload
 from utils.rbac import (
@@ -110,6 +110,16 @@ def get_current_user_context(
                 error_code="invalid_token",
             ),
         )
+    if not user.is_active:
+        register_token_issue(
+            db,
+            organization_id=user.company_id,
+            user_id=user.id,
+            token_issue="inactive_user",
+            context=extract_request_security_context(request),
+        )
+        db.commit()
+        ensure_user_is_active(user)
     request.state.user_id = user.id
     return _serialize_user_context(user)
 

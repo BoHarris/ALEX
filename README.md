@@ -1,134 +1,232 @@
-# ALEX Privacy Scanning Platform
+# ALEX
 
-ALEX is a FastAPI + React application for scanning uploaded datasets, detecting PII, redacting sensitive values, and providing downloadable outputs and audit-style reports.
+ALEX is a privacy-focused SaaS application for detecting sensitive information in files and datasets, applying redactions, and operating privacy workflows with auditability.
 
-## Current Capabilities
+The project combines:
 
-- WebAuthn passkey authentication
-- Access token + refresh token session flow (refresh token in `HttpOnly` cookie)
-- File upload and scan pipeline:
-  - parse data
-  - detect PII
-  - redact sensitive values
-  - compute risk score
-  - persist scan metadata
-- Tenant-aware scan access control
-- Download endpoints for redacted files and HTML/PDF reports
-- Admin company overview endpoint with analytics summaries
-- Company settings endpoint (plan-gated)
-- Audit event feed endpoint (plan-gated)
-- Public product pages: Home, Trust, About, Careers, Pricing
+- a FastAPI backend for authentication, scanning, reporting, audit logging, and internal governance APIs
+- a React frontend for customer-facing product workflows and the internal Compliance Workspace
+- a growing internal control layer for security, governance, retention, incident handling, testing visibility, and release review
 
-## Architecture
+## Current Architecture
 
-- Backend: FastAPI + SQLAlchemy
-- Frontend: React + Tailwind CSS
-- Database: SQLAlchemy `DATABASE_URL` (SQLite fallback for local development)
+- Backend: FastAPI, SQLAlchemy, WebAuthn-based authentication, structured security/audit logging
+- Frontend: React, React Router, Tailwind-style utility classes
+- Database: SQLAlchemy-backed `DATABASE_URL` with local SQLite fallback for development
+- Auth model: passkeys/WebAuthn plus bearer access tokens and refresh cookies
+- Internal operations: route-backed Compliance Workspace for employees, policies, vendors, incidents, risks, access reviews, training, testing, audit logs, and code review
 
-## Security Notes
+## Project Structure
 
-- Passkeys are used for authentication (no password login flow in current implementation).
-- Refresh tokens are stored in `HttpOnly` cookies with `SameSite=strict`.
-- Cookie `secure` flag is enabled in production and disabled in local development.
-- Protected routes require bearer access tokens.
-- Scan/report download routes enforce tenant-aware authorization checks.
+```text
+main.py                       FastAPI application entrypoint
+routers/                      API route modules
+services/                     business logic, security, compliance, reporting
+database/                     database setup and SQLAlchemy models
+dependencies/                 FastAPI dependency guards
+utils/                        shared helpers and feature gating
+frontend/                     React application
+tests/                        backend test coverage
+models/                       ML/training-related code and local model asset location
+uploads/                      local upload storage in development
+redacted/                     generated redacted outputs in development
+logs/                         runtime logs in development
+```
 
-## Rate Limits and Quotas
+## Key Implemented Areas
 
-- Tier-based scan limits are enforced server-side.
-- Plan-based defaults:
-  - Free: `1` scan/day, `5MB` upload limit
-  - Pro: `100` scans/day, `10MB` upload limit
-  - Business: `500` scans/day, `25MB` upload limit
+- WebAuthn authentication and token-based session flow
+- File upload, scanning, redaction, and downloadable reports
+- Tenant-aware access controls and plan-aware limits
+- Immutable-style audit logging and security alerts
+- Scan retention and archive lifecycle controls
+- Admin reporting and security dashboard APIs
+- Internal Compliance Workspace with route-backed modules
+- Pre-production Code Review workflow for release/change review
+- Public product pages including Trust, Pricing, About, Careers, and Privacy
 
-## Runtime Requirements
+## Required Runtime Assets
 
-Required environment variables:
+ALEX currently expects these runtime assets:
+
+- `DejaVuSans.ttf`
+  - versioned in the repository
+  - required for report generation/startup validation
+- `models/xgboost_model.pkl`
+  - required for scan startup/runtime
+  - not committed to the repository
+  - must be generated or supplied locally before full scan functionality will work
+
+Legacy/generated font cache pickles and archived model pickles are intentionally not tracked.
+
+## Getting Started
+
+### 1. Create a Python environment
+
+```bash
+python -m venv venv
+venv\Scripts\activate
+```
+
+### 2. Install backend dependencies
+
+This repository currently does not include a pinned root `requirements.txt` or `pyproject.toml`, so backend dependencies need to be installed into your local virtual environment based on the application stack.
+
+At minimum, the environment should include packages used by the codebase such as:
+
+- `fastapi`
+- `uvicorn`
+- `sqlalchemy`
+- `alembic`
+- `python-dotenv`
+- `webauthn`
+- `reportlab` or `weasyprint`
+- the ML/data-processing dependencies needed by the scan pipeline
+
+If you are preparing this repository for broader external use, adding a pinned backend dependency manifest would be the next cleanup step.
+
+### 3. Install frontend dependencies
+
+```bash
+cd frontend
+npm install
+cd ..
+```
+
+### 4. Configure environment variables
+
+Create a local `.env` file in the repository root.
+
+Important variables include:
 
 - `SECRET_KEY`
-
-Production-only required variables:
-
+- `ENV`
 - `DATABASE_URL`
-
-Recommended environment variables:
-
-- `ENV` (`development` or `production`)
-- `ACCESS_TOKEN_EXPIRE_MINUTES`
-- `REFRESH_TOKEN_EXPIRE_MINUTES`
-- `CHALLENGE_TTL_MINUTES`
 - `ORIGIN`
 - `RP_ID`
 - `RP_NAME`
 - `CORS_ORIGINS`
-- `LOG_LEVEL`
-- `LOG_MAX_BYTES`
-- `LOG_BACKUP_COUNT`
-- `ENABLE_STARTUP_SCHEMA_BOOTSTRAP` (set to `true` only for explicit local bootstrap)
+- `ACCESS_TOKEN_EXPIRE_MINUTES`
+- `REFRESH_TOKEN_EXPIRE_MINUTES`
+- `CHALLENGE_TTL_MINUTES`
 
-## Startup Validation
+For local development, `ORIGIN` and `RP_ID` should align with your local frontend host. If `ENV=production`, startup validation still enforces HTTPS except for explicit localhost development usage.
 
-On startup, ALEX validates:
+### 5. Ensure required local assets exist
 
-- environment/auth settings
-- database connectivity
-- required schema state
-- writable directories (`uploads`, `redacted`, `logs`)
-- required assets (including report font)
-- PDF report dependency availability
+Before full startup:
 
-If required schema/tables/columns are missing, startup fails fast with a clear error.
+- keep `DejaVuSans.ttf` in the repository root
+- place or generate `models/xgboost_model.pkl`
 
-## Local Development
+### 6. Run database migrations
 
-1. Install dependencies for backend and frontend.
-2. Configure `.env` for local development.
-3. Start backend:
+Apply the versioned schema before starting the backend:
+
+```bash
+alembic upgrade head
+```
+
+If startup reports a schema version mismatch, migrate the database before retrying.
+
+### 7. Start the backend
+
+Either of these reflects the current app entrypoint:
+
+```bash
+python main.py
+```
+
+or
 
 ```bash
 uvicorn main:app --reload
 ```
 
-4. Start frontend:
+The backend runs on `http://127.0.0.1:8000` by default.
+
+### 8. Start the frontend
 
 ```bash
 cd frontend
 npm start
 ```
 
-## API Notes
+The frontend is configured to proxy API calls to `http://127.0.0.1:8000`.
 
-- Upload/scan route: `POST /predict/`
-- Current user route: `GET /protected/me`
-- Scan list route: `GET /scans`
-- Admin overview route: `GET /admin/overview`
-- Admin audit feed route: `GET /admin/audit-events`
-- Security dashboard route: `GET /admin/security-dashboard`
-- Incident feed route: `GET /admin/incidents`
-- Company settings routes:
-  - `GET /admin/company-settings`
-  - `PUT /admin/company-settings`
-- Protected asset routes:
-  - `GET /scans/{scan_id}/download`
-  - `GET /scans/{scan_id}/report/html`
-  - `GET /scans/{scan_id}/report/pdf`
+## Startup Behavior
 
-## Scope Clarification
+On startup, ALEX validates:
 
-This repository currently focuses on a production-minded beta foundation and does not yet include:
+- environment configuration
+- database connectivity
+- current migration/schema revision
+- required schema state
+- writable runtime directories (`uploads`, `redacted`, `logs`)
+- required report/font assets
+- PDF report dependency availability
 
-- billing/subscription management
-- full audit log explorer UI
+This is intentional: startup should fail fast when the runtime is incomplete or the database has not been migrated.
 
-## Security Controls
+## Useful Endpoints
 
-The current architecture includes additive enterprise security controls intended to support audit readiness without claiming certification:
+- `GET /health`
+- `GET /ready`
+- `POST /predict/`
+- `GET /protected/me`
+- `GET /scans`
+- `GET /admin/overview`
+- `GET /admin/audit-events`
+- `GET /admin/security-dashboard`
+- `GET /compliance/overview`
+- `GET /compliance/code-reviews`
 
-- Centralized immutable-style audit logging via `audit_logs`
-- Role-aware authorization with `user`, `organization_admin`, and `security_admin` access controls
-- Scan lifecycle retention fields on `scan_results` for active, archived, and expired states
-- Security alert generation for suspicious login activity, token abuse patterns, and excessive scan activity
-- Global request IDs, structured request logging, HTTPS enforcement in production, and standard web security headers
-- Basic incident tracking via `security_incidents`
-- distributed background worker processing
-- globally distributed rate limiting infrastructure
+## Internal Compliance Workspace
+
+The internal workspace is route-backed and currently includes:
+
+- Overview
+- Employees
+- Policies
+- Vendors
+- Incidents
+- Risks
+- Access Reviews
+- Training
+- Code Review
+- Testing & Validation
+- Audit Log
+
+This area is intended to support operational maturity and enterprise-readiness work without claiming certification.
+
+## Repository Notes
+
+- Local runtime directories such as `uploads/`, `redacted/`, and `logs/` are intentionally ignored.
+- Local databases, caches, and generated build output are ignored.
+- Generated font cache files and archived pickle artifacts are not part of the public source of truth.
+
+## Testing
+
+Backend tests:
+
+```bash
+python -m pytest tests
+```
+
+Database migrations:
+
+```bash
+alembic upgrade head
+alembic downgrade -1
+```
+
+Frontend production build:
+
+```bash
+cd frontend
+npm run build
+```
+
+## Public Repo Status
+
+This repository is an active product codebase, not a polished SDK or template. Some startup dependencies, especially the local scan model artifact, still require developer setup. The codebase is production-minded, but the repository remains under active refinement as the platform evolves.

@@ -3,14 +3,21 @@ from __future__ import annotations
 import json
 import logging
 import os
+import hashlib
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from threading import Lock
+from datetime import datetime, timezone
 
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from database.models.audit_log import AuditLog
 from database.models.security_incident import SecurityIncident
+from services.security_state_store import (
+    SecurityStateStoreError,
+    increment_counter,
+    register_distinct_member,
+)
+from utils.api_errors import error_payload
 
 logger = logging.getLogger(__name__)
 
@@ -21,33 +28,101 @@ SCAN_ALERT_WINDOW_MINUTES = int(os.getenv("SCAN_ALERT_WINDOW_MINUTES", "10"))
 TOKEN_ALERT_THRESHOLD = int(os.getenv("TOKEN_ALERT_THRESHOLD", "5"))
 UNUSUAL_IP_THRESHOLD = int(os.getenv("UNUSUAL_IP_THRESHOLD", "5"))
 
-_monitor_lock = Lock()
-_failed_login_window: dict[str, list[datetime]] = {}
-_scan_window: dict[str, list[datetime]] = {}
-_token_window: dict[str, list[datetime]] = {}
-_ip_window: dict[str, set[str]] = {}
+FAILED_LOGIN_WINDOW_SECONDS = FAILED_LOGIN_WINDOW_MINUTES * 60
+SCAN_ALERT_WINDOW_SECONDS = SCAN_ALERT_WINDOW_MINUTES * 60
 
 
 @dataclass(frozen=True)
 class RequestSecurityContext:
     ip_address: str | None = None
     device_fingerprint: str | None = None
+    user_agent: str | None = None
+    advisory_ip_address: str | None = None
+    trusted_proxy: bool = False
+    session_binding_hash: str | None = None
     request_id: str | None = None
+
+
+TRUST_PROXY_HEADERS = (os.getenv("TRUST_PROXY_HEADERS") or "false").strip().lower() == "true"
+TRUSTED_PROXY_IPS = {
+    value.strip()
+    for value in (os.getenv("TRUSTED_PROXY_IPS") or "").split(",")
+    if value.strip()
+}
+
+
+def _normalize_header_value(value: str | None, *, max_length: int = 512) -> str | None:
+    if value is None:
+        return None
+    normalized = " ".join(value.strip().split())
+    if not normalized:
+        return None
+    return normalized[:max_length]
+
+
+def _hash_value(value: str | None) -> str | None:
+    if not value:
+        return None
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _request_peer_ip(request) -> str | None:
+    if getattr(request, "client", None) and getattr(request.client, "host", None):
+        return request.client.host
+    return None
+
+
+def _trusted_forwarded_ip(headers, *, peer_ip: str | None) -> tuple[str | None, bool, str | None]:
+    forwarded_for = _normalize_header_value(headers.get("x-forwarded-for"), max_length=256)
+    if not forwarded_for:
+        return peer_ip, False, None
+
+    advisory_ip = forwarded_for.split(",", 1)[0].strip() or None
+    if not advisory_ip:
+        return peer_ip, False, None
+
+    proxy_trusted = TRUST_PROXY_HEADERS or (peer_ip is not None and peer_ip in TRUSTED_PROXY_IPS)
+    if not proxy_trusted:
+        return peer_ip, False, advisory_ip
+
+    return advisory_ip, True, advisory_ip
+
+
+def build_session_binding_hash(
+    *,
+    user_agent: str | None,
+    advisory_device_fingerprint: str | None,
+) -> str | None:
+    normalized_user_agent = _normalize_header_value(user_agent)
+    normalized_device_fingerprint = _normalize_header_value(advisory_device_fingerprint, max_length=256)
+    binding_parts = [
+        part
+        for part in (normalized_user_agent, normalized_device_fingerprint)
+        if part
+    ]
+    if not binding_parts:
+        return None
+    return _hash_value("|".join(binding_parts))
 
 
 def extract_request_security_context(request) -> RequestSecurityContext:
     headers = getattr(request, "headers", {}) or {}
-    forwarded_for = headers.get("x-forwarded-for")
-    ip_address = None
-    if forwarded_for:
-        ip_address = forwarded_for.split(",", 1)[0].strip()
-    elif getattr(request, "client", None) and getattr(request.client, "host", None):
-        ip_address = request.client.host
-    device_fingerprint = headers.get("x-device-fingerprint") or headers.get("user-agent")
+    peer_ip = _request_peer_ip(request)
+    ip_address, trusted_proxy, advisory_ip = _trusted_forwarded_ip(headers, peer_ip=peer_ip)
+    user_agent = _normalize_header_value(headers.get("user-agent"))
+    advisory_device_fingerprint = _normalize_header_value(headers.get("x-device-fingerprint"), max_length=256)
+    device_fingerprint = _hash_value(advisory_device_fingerprint)
     request_id = getattr(getattr(request, "state", None), "request_id", None)
     return RequestSecurityContext(
         ip_address=ip_address,
         device_fingerprint=device_fingerprint,
+        user_agent=user_agent,
+        advisory_ip_address=advisory_ip,
+        trusted_proxy=trusted_proxy,
+        session_binding_hash=build_session_binding_hash(
+            user_agent=user_agent,
+            advisory_device_fingerprint=advisory_device_fingerprint,
+        ),
         request_id=request_id,
     )
 
@@ -108,26 +183,50 @@ def create_security_incident(
     return incident
 
 
-def _prune(window: list[datetime], *, minutes: int) -> list[datetime]:
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
-    return [value for value in window if value >= cutoff]
+def _hash_state_identifier(value: str | None) -> str | None:
+    normalized = _normalize_header_value(value, max_length=256)
+    if not normalized:
+        return None
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
-def _should_alert(counter: dict[str, list[datetime]], key: str, *, threshold: int, window_minutes: int) -> bool:
-    now = datetime.now(timezone.utc)
-    history = _prune(counter.get(key, []), minutes=window_minutes)
-    history.append(now)
-    counter[key] = history
-    return len(history) >= threshold
+def _increment_threshold_counter(
+    db: Session,
+    *,
+    namespace: str,
+    state_key: str,
+    threshold: int,
+    window_seconds: int,
+) -> bool:
+    count = increment_counter(
+        db,
+        namespace=namespace,
+        state_key=state_key,
+        window_seconds=window_seconds,
+    )
+    return count >= threshold
 
 
-def _track_ip_identity(ip_address: str | None, identity: str | None) -> bool:
+def _track_ip_identity(
+    db: Session,
+    *,
+    ip_address: str | None,
+    identity: str | None,
+) -> bool:
     if not ip_address or not identity:
         return False
-    identities = _ip_window.get(ip_address, set())
-    identities.add(identity)
-    _ip_window[ip_address] = identities
-    return len(identities) >= UNUSUAL_IP_THRESHOLD
+    ip_key = _hash_state_identifier(ip_address)
+    identity_key = _hash_state_identifier(identity)
+    if not ip_key or not identity_key:
+        return False
+    distinct_count = register_distinct_member(
+        db,
+        namespace="security:ip_identity",
+        owner_key=ip_key,
+        member_key=identity_key,
+        window_seconds=FAILED_LOGIN_WINDOW_SECONDS,
+    )
+    return distinct_count >= UNUSUAL_IP_THRESHOLD
 
 
 def raise_security_alert(
@@ -172,14 +271,22 @@ def register_failed_login(
     context: RequestSecurityContext,
 ) -> bool:
     key = email.strip().lower() or (context.ip_address or "unknown")
-    with _monitor_lock:
-        threshold_hit = _should_alert(
-            _failed_login_window,
-            key,
+    try:
+        threshold_hit = _increment_threshold_counter(
+            db,
+            namespace="security:failed_login",
+            state_key=_hash_state_identifier(key) or "unknown",
             threshold=FAILED_LOGIN_ALERT_THRESHOLD,
-            window_minutes=FAILED_LOGIN_WINDOW_MINUTES,
+            window_seconds=FAILED_LOGIN_WINDOW_SECONDS,
         )
-        unusual_ip = _track_ip_identity(context.ip_address, key)
+        unusual_ip = _track_ip_identity(
+            db,
+            ip_address=context.ip_address,
+            identity=key,
+        )
+    except SecurityStateStoreError:
+        logger.exception("Shared security state store unavailable during failed-login tracking.")
+        raise
     if threshold_hit or unusual_ip:
         raise_security_alert(
             db,
@@ -196,6 +303,48 @@ def register_failed_login(
     return False
 
 
+def enforce_auth_rate_limit(
+    db: Session,
+    *,
+    request,
+    identifier: str | None = None,
+    per_ip_limit: int,
+    per_identifier_limit: int,
+    window_seconds: int,
+) -> None:
+    context = extract_request_security_context(request)
+    key_values = [("ip", context.ip_address or "unknown", per_ip_limit)]
+    if identifier:
+        key_values.append(("id", identifier.strip().lower(), per_identifier_limit))
+
+    try:
+        for scope, raw_key, threshold in key_values:
+            threshold_hit = _increment_threshold_counter(
+                db,
+                namespace=f"security:auth_ratelimit:{scope}",
+                state_key=_hash_state_identifier(raw_key) or "unknown",
+                threshold=threshold,
+                window_seconds=window_seconds,
+            )
+            if threshold_hit:
+                raise HTTPException(
+                    status_code=429,
+                    detail=error_payload(
+                        detail="Rate limit exceeded",
+                        error_code="rate_limit_exceeded",
+                    ),
+                )
+    except SecurityStateStoreError as exc:
+        logger.exception("Shared security state store unavailable during auth rate limiting.")
+        raise HTTPException(
+            status_code=503,
+            detail=error_payload(
+                detail="Authentication security controls are temporarily unavailable.",
+                error_code="security_state_unavailable",
+            ),
+        ) from exc
+
+
 def register_scan_activity(
     db: Session,
     *,
@@ -204,13 +353,17 @@ def register_scan_activity(
     context: RequestSecurityContext,
 ) -> bool:
     key = str(user_id or context.ip_address or "anonymous")
-    with _monitor_lock:
-        threshold_hit = _should_alert(
-            _scan_window,
-            key,
+    try:
+        threshold_hit = _increment_threshold_counter(
+            db,
+            namespace="security:scan_activity",
+            state_key=_hash_state_identifier(key) or "anonymous",
             threshold=SCAN_ALERT_THRESHOLD,
-            window_minutes=SCAN_ALERT_WINDOW_MINUTES,
+            window_seconds=SCAN_ALERT_WINDOW_SECONDS,
         )
+    except SecurityStateStoreError:
+        logger.exception("Shared security state store unavailable during scan-activity tracking.")
+        raise
     if threshold_hit:
         raise_security_alert(
             db,
@@ -235,13 +388,17 @@ def register_token_issue(
     context: RequestSecurityContext,
 ) -> bool:
     key = f"{user_id or 'anonymous'}:{token_issue}"
-    with _monitor_lock:
-        threshold_hit = _should_alert(
-            _token_window,
-            key,
+    try:
+        threshold_hit = _increment_threshold_counter(
+            db,
+            namespace="security:token_issue",
+            state_key=_hash_state_identifier(key) or "anonymous",
             threshold=TOKEN_ALERT_THRESHOLD,
-            window_minutes=FAILED_LOGIN_WINDOW_MINUTES,
+            window_seconds=FAILED_LOGIN_WINDOW_SECONDS,
         )
+    except SecurityStateStoreError:
+        logger.exception("Shared security state store unavailable during token-issue tracking.")
+        raise
     if threshold_hit:
         raise_security_alert(
             db,

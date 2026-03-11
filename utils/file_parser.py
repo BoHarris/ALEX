@@ -8,9 +8,9 @@ import uuid
 import re
 import numpy as np
 import logging
-import joblib
 from utils.redaction import scan_and_redact_column_with_count
 from utils.constants import SUPPORTED_EXTENSIONS
+from services.scan_service import get_scan_model, _write_redacted_json_output, _write_redacted_xml_output
 from PyPDF2 import PdfReader
 
 import mimetypes
@@ -19,8 +19,6 @@ import json
 import xml.etree.ElementTree as ET
 
 router = APIRouter(prefix="/predict", tags=["Prediction"])
-
-xgb_model = joblib.load("models/xgboost_model.pkl")
 
 EMAIL_RE = re.compile(r"[^@]+@[^@]+\.[^@]+")
 PHONE_RE = re.compile(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}")
@@ -151,7 +149,7 @@ async def predict(file: UploadFile = File(...)):
         "has_city_name", "has_known_name", "has_zip_pattern", "has_phone_pattern"
     ]
 
-    predictions = xgb_model.predict(X[feature_columns])
+    predictions = get_scan_model().predict(X[feature_columns])
     pii_columns = [col for col, is_pii in zip(features, predictions) if is_pii == 0]
 
     redacted_df = df.copy()
@@ -170,16 +168,9 @@ async def predict(file: UploadFile = File(...)):
     elif ext.lower() in [".xlsx", ".xls"]:
         redacted_df.to_excel(redacted_path, index=False)
     elif ext.lower() == ".json":
-        redacted_df.to_json(redacted_path, orient="records", lines=True)
+        _write_redacted_json_output(redacted_df=redacted_df, redacted_path=redacted_path, scan_id=None)
     elif ext.lower() == ".xml":
-        root = ET.Element("root")
-        for _, row in redacted_df.iterrows():
-            item = ET.SubElement(root, "item")
-            for col, val in row.items():
-                child = ET.SubElement(item, col)
-                child.text = str(val)
-        tree = ET.ElementTree(root)
-        tree.write(redacted_path)
+        _write_redacted_xml_output(redacted_df=redacted_df, redacted_path=redacted_path)
     else:
         redacted_df.to_csv(redacted_path, index=False)  # Default fallback
 

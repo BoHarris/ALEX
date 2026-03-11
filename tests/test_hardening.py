@@ -18,12 +18,14 @@ from database.database import Base
 from database.models.company_settings import CompanySettings
 from database.models.company import Company
 from database.models.scan_quota_counter import ScanQuotaCounter
+from database.models.security_state import SecurityState
 from database.models.user import User
 from dependencies.tier_guard import _parse_subject_as_int
 from routers import predict as predict_router
 from routers import redacted_router
 from utils.auth_utils import create_access_token, decode_token_with_error
 from utils.tier_limiter import has_remaining_scan_quota, release_scan_quota_reservation, reserve_scan_quota
+from services.security_state_store import SecurityStateStoreError
 
 try:
     from routers import webauthn_auth
@@ -121,7 +123,9 @@ def test_auth_rate_limit_blocks_when_threshold_reached(monkeypatch):
     monkeypatch.setattr(webauthn_auth, "AUTH_RATE_WINDOW_SECONDS", 60)
     monkeypatch.setattr(webauthn_auth, "AUTH_RATE_LIMIT_PER_IP", 1)
     monkeypatch.setattr(webauthn_auth, "AUTH_RATE_LIMIT_PER_IDENTIFIER", 1)
-    webauthn_auth._auth_rate_windows.clear()
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine, tables=[SecurityState.__table__])
+    session = sessionmaker(bind=engine, autocommit=False, autoflush=False)()
 
     class _Client:
         host = "127.0.0.1"
@@ -130,7 +134,33 @@ def test_auth_rate_limit_blocks_when_threshold_reached(monkeypatch):
         client = _Client()
 
     request = _Request()
-    webauthn_auth._enforce_auth_rate_limit(request=request, identifier="a@example.com")
+    webauthn_auth._enforce_auth_rate_limit(db=session, request=request, identifier="a@example.com")
     with pytest.raises(HTTPException) as exc:
-        webauthn_auth._enforce_auth_rate_limit(request=request, identifier="a@example.com")
+        webauthn_auth._enforce_auth_rate_limit(db=session, request=request, identifier="a@example.com")
     assert exc.value.status_code == 429
+
+
+def test_auth_rate_limit_returns_degraded_security_error_when_store_unavailable(monkeypatch):
+    if webauthn_auth is None:
+        pytest.skip("webauthn dependency is not installed in this test environment")
+
+    class _Client:
+        host = "127.0.0.1"
+
+    class _Request:
+        client = _Client()
+        headers = {"user-agent": "pytest"}
+
+    monkeypatch.setattr(
+        "services.security_service._increment_threshold_counter",
+        lambda *args, **kwargs: (_ for _ in ()).throw(SecurityStateStoreError()),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        webauthn_auth._enforce_auth_rate_limit(
+            db=None,
+            request=_Request(),
+            identifier="a@example.com",
+        )
+    assert exc.value.status_code == 503
+    assert exc.value.detail["error_code"] == "security_state_unavailable"

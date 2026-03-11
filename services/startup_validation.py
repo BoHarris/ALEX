@@ -6,34 +6,14 @@ from urllib.parse import urlparse
 
 from sqlalchemy import inspect, text
 
-from database.database import ENV, Base, engine
-from database.models.audit_event import AuditEvent
-from database.models.audit_log import AuditLog
-from database.models.compliance_activity import ComplianceActivity
-from database.models.compliance_approval import ComplianceApproval
-from database.models.compliance_attachment import ComplianceAttachment
-from database.models.compliance_comment import ComplianceComment
-from database.models.compliance_record import ComplianceRecord
-from database.models.compliance_test_case_result import ComplianceTestCaseResult
-from database.models.compliance_test_run import ComplianceTestRun
-from database.models.code_review import CodeReview
-from database.models.company_settings import CompanySettings
-from database.models.employee import Employee
-from database.models.grc_incident import GRCIncident
-from database.models.hr_control import HRControl
-from database.models.access_review import AccessReview
-from database.models.risk_register_item import RiskRegisterItem
-from database.models.scan_quota_counter import ScanQuotaCounter
-from database.models.security_incident import SecurityIncident
-from database.models.training_assignment import TrainingAssignment
-from database.models.training_module import TrainingModule
-from database.models.vendor import Vendor
-from database.models.wiki_page import WikiPage
+from database.database import ENV, engine
 from services.compliance_service import ensure_default_company_and_employee
+from services.scan_service import initialize_scan_model
 
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+MIGRATIONS_DIR = BASE_DIR / "migrations" / "versions"
 MODEL_PATH = BASE_DIR / "models" / "xgboost_model.pkl"
 FONT_PATH = BASE_DIR / "DejaVuSans.ttf"
 REQUIRED_DIRS = (
@@ -43,11 +23,14 @@ REQUIRED_DIRS = (
 )
 REQUIRED_SCHEMA = {
     "users": {"id", "email", "role", "company_id", "refresh_version"},
+    "pending_registrations": {"id", "email", "webauthn_user_handle", "challenge", "expires_at"},
+    "refresh_sessions": {"id", "user_id", "refresh_jti_hash", "revoked", "created_at"},
     "scan_results": {"id", "user_id", "company_id", "filename", "redacted_type_counts"},
     "webauthn_challenges": {"id", "user_id", "challenge", "challenge_type", "expires_at"},
     "company_settings": {"id", "company_id", "default_policy_label", "allowed_upload_types"},
     "audit_events": {"id", "company_id", "user_id", "event_type", "description", "created_at"},
     "audit_logs": {"id", "user_id", "organization_id", "event_type", "event_category", "created_at"},
+    "security_states": {"id", "namespace", "state_key", "counter_value", "expires_at"},
     "scan_quota_counters": {"id", "user_id", "day", "count"},
     "security_incidents": {"id", "severity", "status", "description", "detected_at"},
     "employees": {"id", "employee_id", "email", "role", "company_id", "user_id"},
@@ -67,18 +50,6 @@ REQUIRED_SCHEMA = {
     "hr_controls": {"id", "compliance_record_id", "employee_id", "control_type", "status"},
     "risk_register_items": {"id", "compliance_record_id", "risk_title", "risk_category", "risk_score"},
     "code_reviews": {"id", "compliance_record_id", "summary", "review_type", "risk_level", "created_by_employee_id"},
-}
-ADDITIVE_SCHEMA_UPDATES = {
-    "scan_results": [
-        "ALTER TABLE scan_results ADD COLUMN status VARCHAR DEFAULT 'active' NOT NULL",
-        "ALTER TABLE scan_results ADD COLUMN archived_at DATETIME",
-        "ALTER TABLE scan_results ADD COLUMN retention_expiration DATETIME",
-    ],
-    "company_settings": [
-        "ALTER TABLE company_settings ADD COLUMN retention_days INTEGER",
-        "ALTER TABLE company_settings ADD COLUMN require_storage_encryption VARCHAR",
-        "ALTER TABLE company_settings ADD COLUMN secure_cookie_enforced VARCHAR",
-    ],
 }
 
 
@@ -178,56 +149,29 @@ def _validate_database() -> None:
         raise RuntimeError("Database connection failed") from exc
 
 
-def _bootstrap_feature_tables() -> None:
-    """
-    Explicitly create beta feature tables when absent.
-    This is restricted to additive table creation only (no column mutation).
-    """
-    Base.metadata.create_all(
-        bind=engine,
-        tables=[
-            CompanySettings.__table__,
-            AuditEvent.__table__,
-            AuditLog.__table__,
-            ScanQuotaCounter.__table__,
-            SecurityIncident.__table__,
-            Employee.__table__,
-            ComplianceRecord.__table__,
-            ComplianceComment.__table__,
-            ComplianceAttachment.__table__,
-            ComplianceApproval.__table__,
-            ComplianceActivity.__table__,
-            WikiPage.__table__,
-            Vendor.__table__,
-            ComplianceTestRun.__table__,
-            ComplianceTestCaseResult.__table__,
-            AccessReview.__table__,
-            TrainingModule.__table__,
-            TrainingAssignment.__table__,
-            GRCIncident.__table__,
-            HRControl.__table__,
-            RiskRegisterItem.__table__,
-            CodeReview.__table__,
-        ],
-    )
-    logger.info(
-        "Startup validation: feature tables ensured (company_settings, audit_events, audit_logs, scan_quota_counters, security_incidents)."
-    )
+def _required_schema_revision() -> str:
+    revisions = sorted(path.stem for path in MIGRATIONS_DIR.glob("*.py") if path.name != "__init__.py")
+    if not revisions:
+        raise RuntimeError("Migration configuration is missing. Create and apply migrations before startup.")
+    return revisions[-1]
 
 
-def _apply_additive_schema_updates() -> None:
+def _validate_schema_revision() -> None:
+    expected_revision = _required_schema_revision()
     inspector = inspect(engine)
-    with engine.begin() as conn:
-        for table_name, statements in ADDITIVE_SCHEMA_UPDATES.items():
-            if not inspector.has_table(table_name):
-                continue
-            existing_columns = {column["name"] for column in inspector.get_columns(table_name)}
-            for statement in statements:
-                column_name = statement.split("ADD COLUMN", 1)[1].strip().split(" ", 1)[0]
-                if column_name in existing_columns:
-                    continue
-                conn.execute(text(statement))
-                logger.warning("Startup validation: applied additive schema update %s.%s", table_name, column_name)
+    if not inspector.has_table("alembic_version"):
+        raise RuntimeError("Database schema version mismatch. Run migrations before starting the application.")
+
+    with engine.connect() as conn:
+        revisions = {row[0] for row in conn.execute(text("SELECT version_num FROM alembic_version"))}
+
+    if revisions != {expected_revision}:
+        raise RuntimeError(
+            "Database schema version mismatch. "
+            f"Expected revision {expected_revision}; run migrations before starting the application."
+        )
+
+    logger.info("Startup validation: schema revision OK (%s).", expected_revision)
 
 
 def _validate_schema_state() -> None:
@@ -284,12 +228,15 @@ def _validate_directories() -> None:
 
 
 def _validate_assets() -> None:
-    if not MODEL_PATH.is_file():
-        raise RuntimeError(f"Model file not found at configured path: {MODEL_PATH}")
-
     if not FONT_PATH.is_file():
         raise RuntimeError(f"Required report asset not found at configured path: {FONT_PATH}")
     logger.info("Startup validation: required assets present.")
+
+
+def _validate_model_loading():
+    model = initialize_scan_model(MODEL_PATH)
+    logger.info("Startup validation: XGBoost model loaded successfully from %s", MODEL_PATH)
+    return model
 
 
 def _validate_pdf_support() -> None:
@@ -311,19 +258,14 @@ def _validate_pdf_support() -> None:
     )
 
 
-def run_startup_validations() -> None:
+def run_startup_validations():
     """
     Central startup validation entrypoint.
     Raises RuntimeError for blocking startup issues and logs warnings for optional capabilities.
     """
     _validate_environment()
     _validate_database()
-    if (os.getenv("ENABLE_STARTUP_SCHEMA_BOOTSTRAP") or "true").strip().lower() == "true":
-        logger.warning(
-            "Startup validation: ENABLE_STARTUP_SCHEMA_BOOTSTRAP=true; applying additive feature table bootstrap."
-        )
-        _bootstrap_feature_tables()
-        _apply_additive_schema_updates()
+    _validate_schema_revision()
     _validate_schema_state()
     from database.database import SessionLocal
 
@@ -334,5 +276,7 @@ def run_startup_validations() -> None:
         db.close()
     _validate_directories()
     _validate_assets()
+    model = _validate_model_loading()
     _validate_pdf_support()
     logger.info("Startup validation completed successfully.")
+    return model

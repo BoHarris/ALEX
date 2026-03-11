@@ -5,6 +5,9 @@ from dotenv import load_dotenv
 import os
 from typing import Optional, Tuple, Any, Dict
 import logging as logger
+from fastapi import HTTPException
+
+from utils.api_errors import error_payload
 load_dotenv()
 
 SECRET_KEY = os.getenv("SECRET_KEY")
@@ -55,6 +58,24 @@ def create_refresh_token(user_id: int, refresh_version: int) -> str:
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
+def issue_refresh_token(user_id: int, refresh_version: int) -> tuple[str, str]:
+    refresh_jti = str(uuid.uuid4())
+    expire = datetime.now(timezone.utc) + timedelta(minutes=REFRESH_TOKEN_EXPIRE_MINUTES)
+    to_encode = {
+        "sub": str(user_id),
+        "ver": str(refresh_version),
+        "typ": "refresh",
+        "exp": expire,
+        "iat": datetime.now(timezone.utc),
+        "jti": refresh_jti,
+    }
+    if JWT_ISSUER:
+        to_encode["iss"] = JWT_ISSUER
+    if JWT_AUDIENCE:
+        to_encode["aud"] = JWT_AUDIENCE
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM), refresh_jti
+
+
 def _decode_token(
     token: str,
     *,
@@ -97,6 +118,18 @@ def decode_token_with_error(token: str) -> tuple[Optional[Dict[str, Any]], Optio
 
 def decode_refresh_token_with_error(token: str) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     return _decode_token(token, expected_type="refresh")
+
+
+def ensure_user_is_active(user: Any) -> None:
+    if getattr(user, "is_active", True):
+        return
+    raise HTTPException(
+        status_code=401,
+        detail=error_payload(
+            detail="User account is inactive",
+            error_code="ACCOUNT_DISABLED",
+        ),
+    )
     
 def get_user_info_from_token(token: str) -> Optional[Tuple[Optional[str], Optional[str]]]:
     """

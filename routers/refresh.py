@@ -6,8 +6,14 @@ import os
 from database.database import get_db
 from database.models.user import User
 from services.audit_service import record_audit_event
+from services.refresh_session_service import (
+    revoke_refresh_session,
+    revoke_refresh_session_record,
+    rotate_refresh_session,
+    validate_refresh_session,
+)
 from services.security_service import extract_request_security_context, register_token_issue
-from utils.auth_utils import create_access_token, decode_refresh_token_with_error
+from utils.auth_utils import create_access_token, decode_refresh_token_with_error, ensure_user_is_active, issue_refresh_token
 from utils.api_errors import error_payload
 from utils.rbac import normalize_role
 
@@ -72,7 +78,16 @@ def refresh_access_token(
         )
     user_id = _parse_subject_as_int(payload.get("sub"))
     token_ver = payload.get("ver")
+    refresh_jti = payload.get("jti")
     if token_ver is None:
+        raise HTTPException(
+            status_code=401,
+            detail=error_payload(
+                detail="Invalid refresh token",
+                error_code="invalid_token",
+            ),
+        )
+    if not refresh_jti:
         raise HTTPException(
             status_code=401,
             detail=error_payload(
@@ -98,6 +113,26 @@ def refresh_access_token(
                 error_code="invalid_token",
             ),
         )
+    request_context = extract_request_security_context(request)
+    if not user.is_active:
+        register_token_issue(
+            db,
+            organization_id=user.company_id,
+            user_id=user.id,
+            token_issue="inactive_user",
+            context=request_context,
+        )
+        revoke_refresh_session(db, refresh_jti=refresh_jti)
+        user.refresh_version = int(getattr(user, "refresh_version", 0)) + 1
+        db.add(user)
+        db.commit()
+        response.delete_cookie(
+            key="refresh_token",
+            httponly=True,
+            samesite="strict",
+            secure=IS_PROD,
+        )
+        ensure_user_is_active(user)
     
     #refresh token revocation check
     current_ver = int(getattr(user, "refresh_version", 0))
@@ -107,13 +142,51 @@ def refresh_access_token(
             organization_id=user.company_id,
             user_id=user.id,
             token_issue="refresh_version_mismatch",
-            context=extract_request_security_context(request),
+            context=request_context,
         )
         db.commit()
         raise HTTPException(
             status_code=401,
             detail=error_payload(
                 detail="Refresh token revoked",
+                error_code="session_expired",
+            ),
+        )
+    session_validation = validate_refresh_session(
+        db,
+        user_id=user.id,
+        refresh_jti=refresh_jti,
+        context=request_context,
+    )
+    if not session_validation.ok:
+        register_token_issue(
+            db,
+            organization_id=user.company_id,
+            user_id=user.id,
+            token_issue=f"refresh_session_{session_validation.reason}",
+            context=request_context,
+        )
+        if session_validation.reason == "binding_mismatch":
+            revoke_refresh_session_record(db, session=session_validation.session)
+            db.commit()
+            response.delete_cookie(
+                key="refresh_token",
+                httponly=True,
+                samesite="strict",
+                secure=IS_PROD,
+            )
+            raise HTTPException(
+                status_code=401,
+                detail=error_payload(
+                    detail="Reauthentication required",
+                    error_code="reauthentication_required",
+                ),
+            )
+        db.commit()
+        raise HTTPException(
+            status_code=401,
+            detail=error_payload(
+                detail="Invalid session",
                 error_code="session_expired",
             ),
         )
@@ -134,10 +207,14 @@ def refresh_access_token(
     db.commit()
     db.refresh(user)
 
-    new_refresh = create_access_token(
-            data={"sub": str(user.id), "ver": int(user.refresh_version), "typ": "refresh"},
-            expires_delta=timedelta(minutes=REFRESH_TOKEN_TTL_MIN)
+    new_refresh, new_refresh_jti = issue_refresh_token(user.id, int(user.refresh_version))
+    rotate_refresh_session(
+        db,
+        session=session_validation.session,
+        new_refresh_jti=new_refresh_jti,
+        context=request_context,
     )
+    db.commit()
     
     response.set_cookie(
         key="refresh_token",
@@ -156,7 +233,7 @@ def refresh_access_token(
         description="Access and refresh tokens were rotated.",
         target_type="user",
         target_id=str(user.id),
-        request_context=extract_request_security_context(request),
+        request_context=request_context,
         event_metadata={"refresh_version": user.refresh_version},
     )
     db.commit()
