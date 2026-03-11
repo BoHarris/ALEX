@@ -2,6 +2,8 @@ import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "../components/button";
 import { apiUrl } from "../utils/api";
+import { getResponseMessage, readResponseData } from "../utils/http";
+import { setAccessToken } from "../utils/tokenStore";
 
 function base64UrlToUint8Array(base64Url) {
   const padding = "=".repeat((4 - (base64Url.length % 4)) % 4);
@@ -64,17 +66,24 @@ function LoginForm() {
         throw new Error("Passkeys are not supported in this browser.");
       }
 
-      const safeEmail = encodeURIComponent(email.trim().toLowerCase());
+      const safeEmail = email.trim().toLowerCase();
       const optionsRes = await fetch(
-        apiUrl(`/auth/webauthn/login/options?email=${safeEmail}`),
+        apiUrl("/auth/webauthn/login/options"),
         {
           method: "POST",
+          headers: { "Content-Type": "application/json" },
           credentials: "include",
+          body: JSON.stringify({ email: safeEmail }),
         }
       );
-      const optionsData = await optionsRes.json();
+      const { data: optionsData, text: optionsText } = await readResponseData(optionsRes);
       if (!optionsRes.ok) {
-        throw new Error(optionsData.detail || "Failed to begin passkey login");
+        throw new Error(
+          getResponseMessage(optionsData, "Failed to begin passkey login", optionsText),
+        );
+      }
+      if (!optionsData) {
+        throw new Error("Unexpected response from server");
       }
 
       const publicKey = normalizeLoginOptions(optionsData);
@@ -84,24 +93,27 @@ function LoginForm() {
       }
 
       const verifyRes = await fetch(
-        apiUrl(`/auth/webauthn/login/verify?email=${safeEmail}`),
+        apiUrl("/auth/webauthn/login/verify"),
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "include",
-          body: JSON.stringify(serializeAssertion(credential)),
+          body: JSON.stringify({
+            email: safeEmail,
+            credential: serializeAssertion(credential),
+          }),
         }
       );
-      const data = await verifyRes.json().catch(async () => {
-        const txt = await verifyRes.text();
-        throw new Error(txt || "Unexpected response from server");
-      });
+      const { data, text: verifyText } = await readResponseData(verifyRes);
 
       if (!verifyRes.ok) {
-        throw new Error(data.detail || "Login failed");
+        throw new Error(getResponseMessage(data, "Login failed", verifyText));
+      }
+      if (!data) {
+        throw new Error("Unexpected response from server");
       }
 
-      localStorage.setItem("access_token", data.access_token);
+      setAccessToken(data.access_token);
       navigate("/dashboard");
     } catch (err) {
       setError(err.message);
@@ -111,52 +123,59 @@ function LoginForm() {
   };
 
   return (
-    <div className="flex flex-col gap-4 flex items-center justify-center bg-gray-900 px-4">
-      <div className="max-w-md w-full bg-gray-800 p-8 rounded-lg shadow-lg">
-        <h2 className="text-3xl font-bold text-white mb-6 text-center">
+    <div className="flex flex-col items-center justify-center gap-4 px-4">
+      <div className="surface-card w-full max-w-md p-8 shadow-lg">
+        <h1 className="mb-6 text-center text-3xl font-bold text-app">
           Welcome to ALEX
-        </h2>
-        <p className="text-gray-300 text-sm text-center mb-6 leading-relaxed">
+        </h1>
+        <p className="mb-6 text-center text-sm leading-relaxed text-app-secondary">
           ALEX (Anonymization & Learning EXpert) helps detect and redact personally
           identifiable information while strengthening privacy protection.
         </p>
-        {error && <p className="text-red-500 mb-4 text-center">{error}</p>}
+        {error && (
+          <p className="mb-4 text-center text-red-500" role="alert">
+            {error}
+          </p>
+        )}
 
-        <form onSubmit={handleSubmit} className="space-y-5">
+        <form onSubmit={handleSubmit} className="space-y-5" aria-busy={loading}>
           <div>
             <label
               htmlFor="email"
-              className="block text-sm font-medium text-gray-300"
+              className="block text-sm font-medium text-app-secondary"
             >
               Email
             </label>
             <input
               id="email"
+              name="email"
               type="email"
+              autoComplete="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
-              className="mt-1 w-full p-3 rounded-md bg-gray-700 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              className="mt-1 w-full rounded-xl border border-app bg-app p-3 text-app focus-visible:outline-none"
             />
           </div>
 
           <Button
             type="submit"
-            className="w-full bg-indigo-600 text-white py-3 rounded-md hover:bg-indigo-700 transition-all duration-200 font-semibold"
+            className="w-full py-3 font-semibold"
             disabled={loading}
+            aria-disabled={loading}
           >
             {loading ? "Signing in..." : "Sign in with Passkey"}
           </Button>
-          <p className="text-xs text-gray-400 text-center -mt-1">
+          <p className="-mt-1 text-center text-xs text-app-muted" aria-live="polite">
             Secure passwordless sign-in using your device passkey.
           </p>
         </form>
 
-        <div className="text-gray-400 text-center mt-4">
+        <div className="mt-4 text-center text-app-secondary">
           Don't have an account?{" "}
           <a
             href="/register"
-            className="text-indigo-400 hover:text-indigo-200 underline"
+            className="underline transition-colors hover:text-app"
           >
             Register here
           </a>

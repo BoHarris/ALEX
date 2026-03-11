@@ -20,6 +20,16 @@ VETERAN_TERMS = {
 PHONE_7_RE = re.compile(r"\b\d{3}-\d{4}\b")
 PHONE_HINT_RE = re.compile(R"\b(phone|tel|telephone|mobile|cell|call)\b", re.I)
 
+PRESIDIO_TYPE_LABELS = {
+    "EMAIL_ADDRESS": "Email Address",
+    "PHONE_NUMBER": "Phone Number",
+    "PERSON": "Full Name",
+    "DATE_TIME": "Date of Birth / Date",
+    "US_SSN": "Social Security Number",
+    "IP_ADDRESS": "IP Address",
+    "LOCATION": "Location",
+}
+
 
 def contains_sensitive_term(value: str, terms: set) -> str:
     lower = value.lower()
@@ -28,9 +38,20 @@ def contains_sensitive_term(value: str, terms: set) -> str:
             return term
     return None
 
-def scan_and_redact_column_with_count(series: pd.Series, column_name: str = "", aggressive: bool =False):
+
+def _normalize_entity_label(entity_type: str | None) -> str:
+    if not entity_type:
+        return "Sensitive Data Pattern"
+    return PRESIDIO_TYPE_LABELS.get(entity_type, entity_type.replace("_", " ").title())
+
+
+def scan_and_redact_column_with_details(series: pd.Series, column_name: str = "", aggressive: bool =False):
     redacted_count = 0
     total_values = len(series)
+    type_counts: dict[str, int] = {}
+
+    def add_type_count(label: str) -> None:
+        type_counts[label] = type_counts.get(label, 0) + 1
 
     def redact_value(val: str) -> str:
         nonlocal redacted_count
@@ -41,15 +62,20 @@ def scan_and_redact_column_with_count(series: pd.Series, column_name: str = "", 
         results = analyzer.analyze(text=val_str, language='en')
         if results:
             redacted_count += 1
+            seen_labels = {_normalize_entity_label(result.entity_type) for result in results}
+            for label in seen_labels:
+                add_type_count(label)
             val_str = anonymizer.anonymize(text=val_str, analyzer_results=results).text
 
         # Custom redactions
         if contains_sensitive_term(val_str, HEALTH_TERMS):
             redacted_count += 1
+            add_type_count("Health Term")
             return "[REDACTED_HEALTH]"
 
         if contains_sensitive_term(val_str, VETERAN_TERMS):
             redacted_count += 1
+            add_type_count("Veteran Status")
             return "[REDACTED_VETERAN]"
         
         
@@ -61,6 +87,7 @@ def scan_and_redact_column_with_count(series: pd.Series, column_name: str = "", 
             if aggressive or has_hint_in_text or has_hint_in_col:
                 val_str = PHONE_7_RE.sub("[REDACTED_PHONE]",val_str)
                 redacted_count += 1
+                add_type_count("Phone Number")
         
         # DOB / youth policy logic
         if is_dob_column(column_name):
@@ -69,9 +96,19 @@ def scan_and_redact_column_with_count(series: pd.Series, column_name: str = "", 
                 labels = get_age_based_redaction_labels(age)
                 if labels:
                     redacted_count += 1
+                    add_type_count("Date of Birth / Date")
                     return "[" + ", ".join(labels) + "]"
         return val_str
     
     redacted_series = series.apply(redact_value)
     risk_score = redacted_count / total_values if total_values > 0 else 0.0
-    return redacted_series, redacted_count, total_values, round(risk_score,2)
+    return redacted_series, redacted_count, total_values, round(risk_score,2), type_counts
+
+
+def scan_and_redact_column_with_count(series: pd.Series, column_name: str = "", aggressive: bool =False):
+    redacted_series, redacted_count, total_values, risk_score, _ = scan_and_redact_column_with_details(
+        series,
+        column_name,
+        aggressive,
+    )
+    return redacted_series, redacted_count, total_values, risk_score

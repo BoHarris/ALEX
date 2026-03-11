@@ -4,29 +4,8 @@ import { Button } from "../components/button";
 import { Input } from "../components/input";
 import { SUPPORTED_EXTENSIONS } from "../utils/constants";
 import { authFetch } from "../utils/authFetch";
-
-async function downloadAsset(path, fallbackName, expectedType = null) {
-  const response = await authFetch(path);
-
-  if (!response.ok) {
-    throw new Error(`Server error: ${response.statusText}`);
-  }
-
-  const contentType = (response.headers.get("Content-Type") || "").toLowerCase();
-  if (expectedType === "pdf" && !contentType.includes("application/pdf")) {
-    throw new Error("Audit report PDF is unavailable.");
-  }
-
-  const blob = await response.blob();
-  const href = window.URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = href;
-  link.download = fallbackName || "redacted-file";
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  window.URL.revokeObjectURL(href);
-}
+import { getResponseMessage, readResponseData } from "../utils/http";
+import { downloadProtectedAsset, getDownloadErrorMessage } from "../utils/downloads";
 
 export default function PiiSentinelUI() {
   const [file, setFile] = useState(null);
@@ -69,9 +48,12 @@ export default function PiiSentinelUI() {
         body: formData,
       });
 
-      const data = await res.json().catch(() => ({}));
+      const { data, text } = await readResponseData(res);
       if (!res.ok) {
-        throw new Error(data.detail || `Server error: ${res.statusText}`);
+        throw new Error(getResponseMessage(data, `Server error: ${res.statusText}`, text));
+      }
+      if (!data) {
+        throw new Error("Unexpected response from server");
       }
 
       setPiiColumns(data.pii_columns || []);
@@ -94,8 +76,11 @@ export default function PiiSentinelUI() {
     }
   };
 
+  const normalizedRiskScore = Number(riskScore);
   const riskPercent =
-    riskScore == null ? null : Math.round(Math.max(0, Math.min(1, riskScore)) * 100);
+    riskScore == null || Number.isNaN(normalizedRiskScore)
+      ? null
+      : Math.max(0, Math.min(100, normalizedRiskScore));
 
   const riskLevel =
     riskPercent == null ? "Not available" : riskPercent >= 70 ? "High" : riskPercent >= 40 ? "Moderate" : "Low";
@@ -124,14 +109,14 @@ export default function PiiSentinelUI() {
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col items-center space-y-8 px-4 py-12">
-      <h1 className="text-3xl font-bold text-white">ALEX Privacy Scan Dashboard</h1>
+      <h1 className="text-3xl font-bold text-app">ALEX Privacy Scan Dashboard</h1>
 
-      <Card className="w-full border border-white/10 bg-slate-900/70 text-white shadow-md">
+      <Card className="w-full shadow-md">
         <CardContent className="space-y-5 p-6">
           <div className="space-y-3">
             <label
               htmlFor="file-upload"
-              className="block font-semibold text-slate-100"
+              className="block font-semibold text-app"
             >
               Upload a File
             </label>
@@ -143,7 +128,7 @@ export default function PiiSentinelUI() {
               onChange={handleFileChange}
             />
             {file && (
-              <p className="mt-2 text-sm text-slate-300">
+              <p className="mt-2 text-sm text-app-secondary">
                 Selected file: {file.name}
               </p>
             )}
@@ -153,17 +138,17 @@ export default function PiiSentinelUI() {
             </Button>
 
             {uploading && (
-              <p className="text-sm italic text-slate-300">
+              <p className="text-sm italic text-app-secondary" role="status" aria-live="polite">
                 Uploading and analyzing file...
               </p>
             )}
 
             {error && !uploading && (
-              <p className="text-sm font-medium text-red-600">{error}</p>
+              <p className="text-sm font-medium text-red-600" role="alert">{error}</p>
             )}
 
             {hasScanned && piiColumns.length === 0 && !uploading && !error && (
-              <p className="text-sm font-medium text-emerald-300">
+              <p className="text-sm font-medium text-emerald-700 dark:text-emerald-300" role="status" aria-live="polite">
                 Scan complete. No sensitive field types were detected.
               </p>
             )}
@@ -172,47 +157,47 @@ export default function PiiSentinelUI() {
       </Card>
 
       {hasScanned && !uploading && !error && (
-        <Card className="w-full border border-cyan-300/20 bg-slate-900/80 text-white shadow-md">
+        <Card className="w-full shadow-md">
           <CardContent className="space-y-6 p-6">
             <div>
-              <h2 className="text-2xl font-bold text-white">Scan Summary</h2>
+              <h2 className="text-2xl font-bold text-app">Scan Summary</h2>
               <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
                 <p>
-                  <span className="font-semibold text-slate-300">File Name:</span>{" "}
+                  <span className="font-semibold text-app-secondary">File Name:</span>{" "}
                   {displayFileName}
                 </p>
                 <p>
-                  <span className="font-semibold text-slate-300">File Type:</span>{" "}
+                  <span className="font-semibold text-app-secondary">File Type:</span>{" "}
                   {fileType}
                 </p>
                 <p>
-                  <span className="font-semibold text-slate-300">Scan Status:</span>{" "}
+                  <span className="font-semibold text-app-secondary">Scan Status:</span>{" "}
                   Complete
                 </p>
                 <p>
-                  <span className="font-semibold text-slate-300">Risk Score:</span>{" "}
+                  <span className="font-semibold text-app-secondary">Risk Score:</span>{" "}
                   {riskPercent == null ? "Not available" : `${riskPercent}%`}
                 </p>
                 <p>
-                  <span className="font-semibold text-slate-300">Risk Level:</span>{" "}
+                  <span className="font-semibold text-app-secondary">Risk Level:</span>{" "}
                   {riskLevel}
                 </p>
                 <p>
-                  <span className="font-semibold text-slate-300">Total Values Redacted:</span>{" "}
+                  <span className="font-semibold text-app-secondary">Total Values Redacted:</span>{" "}
                   {redactedCount ?? "Not available"}
                 </p>
                 <p className="sm:col-span-2">
-                  <span className="font-semibold text-slate-300">Sensitive Field Types Detected:</span>{" "}
+                  <span className="font-semibold text-app-secondary">Sensitive Field Types Detected:</span>{" "}
                   {detectedTypes}
                 </p>
               </div>
             </div>
 
-            <div className="rounded-2xl border border-white/10 bg-slate-950/40 p-4">
-              <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-cyan-100">
+            <div className="surface-panel rounded-2xl p-4">
+              <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-app-muted">
                 Redaction Summary
               </h3>
-              <div className="mt-3 space-y-2 text-sm text-slate-200">
+              <div className="mt-3 space-y-2 text-sm text-app">
                 {typedRedactionRows.length > 0 ? (
                   typedRedactionRows.map(([type, count]) => (
                     <p key={type}>
@@ -235,30 +220,32 @@ export default function PiiSentinelUI() {
             </div>
 
             <div className="rounded-2xl border border-amber-300/20 bg-amber-300/10 p-4">
-              <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-amber-100">
+              <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-amber-700 dark:text-amber-100">
                 Recommended Action
               </h3>
-              <p className="mt-3 text-sm text-amber-50">{recommendation}</p>
+              <p className="mt-3 text-sm text-amber-800 dark:text-amber-50">{recommendation}</p>
             </div>
 
-            <div className="rounded-2xl border border-white/10 bg-slate-950/40 p-4">
-              <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-200">
+            <div className="surface-panel rounded-2xl p-4">
+              <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-app-secondary">
                 Available Outputs
               </h3>
               <div className="mt-3 flex flex-wrap gap-3">
                 {redactedFile && scanId ? (
                   <button
                     onClick={() =>
-                      downloadAsset(`/scans/${scanId}/download`, displayFileName).catch(() => {
-                        setError("Failed to download redacted file.");
-                      })
+                      downloadProtectedAsset(`/scans/${scanId}/download`, displayFileName)
+                        .then(() => setError(null))
+                        .catch((downloadError) => {
+                          setError(downloadError.message);
+                        })
                     }
-                    className="rounded-full bg-cyan-400 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-300"
+                    className="btn-primary-app text-sm"
                   >
                     Download Redacted File
                   </button>
                 ) : (
-                  <span className="text-sm text-slate-400">Redacted file not available.</span>
+                  <span className="text-sm text-app-muted">Redacted file not available.</span>
                 )}
 
                 {scanId ? (
@@ -266,29 +253,36 @@ export default function PiiSentinelUI() {
                     onClick={async () => {
                       const stem = displayFileName.replace(/\.[^.]+$/, "");
                       try {
-                        await downloadAsset(
+                        await downloadProtectedAsset(
                           `/scans/${scanId}/report/pdf`,
                           `${stem}-audit-report.pdf`,
                           "pdf",
                         );
-                      } catch {
-                        try {
-                          await downloadAsset(
-                            `/scans/${scanId}/report/html`,
-                            `${stem}-audit-report.html`,
-                          );
-                          setError("PDF unavailable. Downloaded HTML audit report instead.");
-                        } catch {
-                          setError("Failed to download audit report.");
+                        setError(null);
+                      } catch (pdfError) {
+                        if (pdfError?.status === 501) {
+                          try {
+                            await downloadProtectedAsset(
+                              `/scans/${scanId}/report/html`,
+                              `${stem}-audit-report.html`,
+                            );
+                            setError(
+                              `${getDownloadErrorMessage(501)} Downloaded HTML audit report instead.`,
+                            );
+                          } catch (reportError) {
+                            setError(reportError.message);
+                          }
+                        } else {
+                          setError(pdfError.message);
                         }
                       }
                     }}
-                    className="rounded-full border border-white/20 px-4 py-2 text-sm font-semibold text-white transition hover:bg-white/10"
+                    className="btn-secondary-app text-sm"
                   >
                     Download Audit Report
                   </button>
                 ) : (
-                  <span className="text-sm text-slate-400">Audit report not available.</span>
+                  <span className="text-sm text-app-muted">Audit report not available.</span>
                 )}
               </div>
             </div>

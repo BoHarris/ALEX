@@ -2,7 +2,9 @@ from datetime import datetime
 from pathlib import Path
 from html import escape
 import io
+import json
 import re
+import textwrap
 from html import unescape as html_unescape
 
 from database.models.scan_results import ScanResult
@@ -79,6 +81,53 @@ def _build_findings_rows(flagged_fields: list[str], total_pii_found: int) -> str
     )
 
 
+def _parse_redacted_type_counts(scan: ScanResult) -> dict[str, int]:
+    raw_value = getattr(scan, "redacted_type_counts", None)
+    if not raw_value:
+        return {}
+
+    try:
+        data = json.loads(raw_value)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+
+    if not isinstance(data, dict):
+        return {}
+
+    normalized: dict[str, int] = {}
+    for key, value in data.items():
+        label = str(key).strip()
+        if not label:
+            continue
+        try:
+            normalized[label] = int(value)
+        except (TypeError, ValueError):
+            continue
+    return normalized
+
+
+def _build_type_count_rows(type_counts: dict[str, int], total_pii_found: int) -> str:
+    if not type_counts:
+        if total_pii_found > 0:
+            return (
+                "<tr>"
+                "<td>Sensitive Data Pattern</td>"
+                f"<td>{total_pii_found}</td>"
+                "</tr>"
+            )
+        return (
+            "<tr>"
+            "<td colspan=\"2\">No sensitive data patterns were detected in this scan.</td>"
+            "</tr>"
+        )
+
+    sorted_items = sorted(type_counts.items(), key=lambda item: (-item[1], item[0]))
+    return "".join(
+        f"<tr><td>{escape(label)}</td><td>{count}</td></tr>"
+        for label, count in sorted_items
+    )
+
+
 def generate_audit_report_html(scan: ScanResult) -> str:
     flagged_fields = [item.strip() for item in (scan.pii_types_found or "").split(",") if item.strip()]
     risk_level = _risk_label(scan.risk_score)
@@ -86,6 +135,8 @@ def generate_audit_report_html(scan: ScanResult) -> str:
     scan_timestamp = _format_scanned_at(scan.scanned_at)
     generated_timestamp = _format_generated_at()
     findings_rows = _build_findings_rows(flagged_fields, scan.total_pii_found)
+    type_counts = _parse_redacted_type_counts(scan)
+    type_count_rows = _build_type_count_rows(type_counts, scan.total_pii_found)
     file_type = _display_file_type(scan)
     risk_explanation = _risk_explanation(risk_level)
 
@@ -229,6 +280,18 @@ def generate_audit_report_html(scan: ScanResult) -> str:
     </section>
 
     <section class="section">
+      <h2>Detected and Redacted Data Types</h2>
+      <table>
+        <thead>
+          <tr><th>Data Type</th><th>Redacted Count</th></tr>
+        </thead>
+        <tbody>
+          {type_count_rows}
+        </tbody>
+      </table>
+    </section>
+
+    <section class="section">
       <h2>Redaction Confirmation</h2>
       <p>Sensitive data identified during the scan was automatically redacted to prevent exposure.</p>
       <p>The generated redacted document is suitable for controlled distribution depending on organizational policy.</p>
@@ -250,32 +313,158 @@ def generate_audit_report_html(scan: ScanResult) -> str:
 
 
 def _fallback_pdf_from_html(html: str) -> bytes:
+    from reportlab.lib import colors  # type: ignore
     from reportlab.lib.pagesizes import A4  # type: ignore
-    from reportlab.pdfgen import canvas  # type: ignore
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet  # type: ignore
+    from reportlab.lib.units import inch  # type: ignore
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle  # type: ignore
 
-    # Lightweight HTML-to-text pass for fallback rendering.
-    text = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", html)
-    text = re.sub(r"(?i)</\s*(p|div|h1|h2|h3|li|tr|section|header)\s*>", "\n", text)
-    text = re.sub(r"(?s)<[^>]+>", " ", text)
-    text = html_unescape(text)
-    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
-    lines = [line for line in lines if line]
+    def clean_fragment(fragment: str) -> str:
+        fragment = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", fragment)
+        fragment = re.sub(r"(?i)<\s*br\s*/?\s*>", "<br/>", fragment)
+        fragment = re.sub(r"(?s)<[^>]+>", " ", fragment)
+        fragment = html_unescape(fragment)
+        fragment = re.sub(r"\s+", " ", fragment)
+        return fragment.strip()
+
+    def extract_table_rows(fragment: str) -> list[list[str]]:
+        rows: list[list[str]] = []
+        for row_html in re.findall(r"(?is)<tr[^>]*>(.*?)</tr>", fragment):
+            cells = re.findall(r"(?is)<t[dh][^>]*>(.*?)</t[dh]>", row_html)
+            cleaned = [clean_fragment(cell) for cell in cells]
+            if cleaned:
+                rows.append(cleaned)
+        return rows
+
+    body_match = re.search(r"(?is)<body[^>]*>(.*)</body>", html)
+    body = body_match.group(1) if body_match else html
+    body = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", body)
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "ReportTitle",
+        parent=styles["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=18,
+        leading=22,
+        textColor=colors.HexColor("#111827"),
+        spaceAfter=6,
+    )
+    subtitle_style = ParagraphStyle(
+        "ReportSubtitle",
+        parent=styles["BodyText"],
+        fontName="Helvetica",
+        fontSize=11,
+        leading=14,
+        textColor=colors.HexColor("#374151"),
+        spaceAfter=6,
+    )
+    heading_style = ParagraphStyle(
+        "SectionHeading",
+        parent=styles["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=12,
+        leading=15,
+        textColor=colors.HexColor("#111827"),
+        spaceBefore=8,
+        spaceAfter=6,
+    )
+    body_style = ParagraphStyle(
+        "SectionBody",
+        parent=styles["BodyText"],
+        fontName="Helvetica",
+        fontSize=10,
+        leading=14,
+        textColor=colors.HexColor("#1f2937"),
+        spaceAfter=6,
+    )
+    meta_style = ParagraphStyle(
+        "MetaText",
+        parent=body_style,
+        fontName="Helvetica",
+        fontSize=9.5,
+        leading=13,
+        textColor=colors.HexColor("#374151"),
+        spaceAfter=4,
+    )
+
+    story = []
+
+    header_match = re.search(r"(?is)<header[^>]*>(.*?)</header>", body)
+    if header_match:
+        header_html = header_match.group(1)
+        title_match = re.search(r"(?is)<h1[^>]*>(.*?)</h1>", header_html)
+        subtitle_match = re.search(r"(?is)<p[^>]*class=[\"'][^\"']*subtitle[^\"']*[\"'][^>]*>(.*?)</p>", header_html)
+        subtitle_text = clean_fragment(subtitle_match.group(1)) if subtitle_match else None
+        if title_match:
+            story.append(Paragraph(clean_fragment(title_match.group(1)), title_style))
+        if subtitle_match:
+            story.append(Paragraph(subtitle_text, subtitle_style))
+        for meta in re.findall(r"(?is)<p[^>]*>(.*?)</p>", header_html):
+            cleaned = clean_fragment(meta)
+            if cleaned and cleaned != subtitle_text:
+                story.append(Paragraph(cleaned, meta_style))
+        story.append(Spacer(1, 0.16 * inch))
+
+    for section_html in re.findall(r"(?is)<section[^>]*>(.*?)</section>", body):
+        heading_match = re.search(r"(?is)<h2[^>]*>(.*?)</h2>", section_html)
+        if heading_match:
+            story.append(Paragraph(clean_fragment(heading_match.group(1)), heading_style))
+
+        table_rows = extract_table_rows(section_html)
+        if table_rows:
+            table = Table(table_rows, repeatRows=1, hAlign="LEFT")
+            table.setStyle(
+                TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f3f4f6")),
+                        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#111827")),
+                        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                        ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+                        ("FONTSIZE", (0, 0), (-1, -1), 9),
+                        ("LEADING", (0, 0), (-1, -1), 12),
+                        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#d1d5db")),
+                        ("BACKGROUND", (0, 1), (-1, -1), colors.white),
+                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                        ("TOPPADDING", (0, 0), (-1, -1), 5),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                    ]
+                )
+            )
+            story.append(table)
+            story.append(Spacer(1, 0.12 * inch))
+
+        paragraph_matches = re.findall(r"(?is)<p[^>]*>(.*?)</p>", section_html)
+        for paragraph_html in paragraph_matches:
+            cleaned = clean_fragment(paragraph_html)
+            if cleaned:
+                story.append(Paragraph(cleaned, body_style))
+
+    if not story:
+        # Last-resort plain text extraction.
+        text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", html)
+        text = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", text)
+        text = re.sub(r"(?i)</\s*(p|div|h1|h2|h3|li|tr|section|header|table)\s*>", "\n", text)
+        text = re.sub(r"(?s)<[^>]+>", " ", text)
+        text = html_unescape(text)
+        raw_lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
+        raw_lines = [line for line in raw_lines if line]
+        for line in raw_lines:
+            for wrapped in textwrap.wrap(line, width=95, break_long_words=False, break_on_hyphens=False):
+                story.append(Paragraph(wrapped, body_style))
 
     buffer = io.BytesIO()
-    pdf = canvas.Canvas(buffer, pagesize=A4)
-    width, height = A4
-    margin_x = 50
-    y = height - 50
-    line_height = 14
-
-    for line in lines:
-        pdf.drawString(margin_x, y, line[:130])
-        y -= line_height
-        if y < 50:
-            pdf.showPage()
-            y = height - 50
-
-    pdf.save()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=0.75 * inch,
+        leftMargin=0.75 * inch,
+        topMargin=0.75 * inch,
+        bottomMargin=0.75 * inch,
+    )
+    doc.build(story)
     return buffer.getvalue()
 
 

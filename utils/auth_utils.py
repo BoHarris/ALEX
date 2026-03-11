@@ -1,5 +1,6 @@
 from datetime import datetime, timezone, timedelta
-from jose import JWTError, jwt
+import uuid
+from jose import JWTError, ExpiredSignatureError, jwt
 from dotenv import load_dotenv
 import os
 from typing import Optional, Tuple, Any, Dict
@@ -11,6 +12,8 @@ if not SECRET_KEY:
     raise ValueError("SECRET_KEY is not set in environment variables.")
 
 ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+JWT_ISSUER = (os.getenv("JWT_ISSUER") or "").strip()
+JWT_AUDIENCE = (os.getenv("JWT_AUDIENCE") or "").strip()
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15"))
 REFRESH_TOKEN_EXPIRE_MINUTES = int(os.getenv("REFRESH_TOKEN_EXPIRE_MINUTES", "10080"))
 
@@ -24,8 +27,14 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     Creates an access token for short lived api access
     """
     to_encode = data.copy()
+    if "typ" not in to_encode:
+        to_encode["typ"] = "access"
+    if JWT_ISSUER and "iss" not in to_encode:
+        to_encode["iss"] = JWT_ISSUER
+    if JWT_AUDIENCE and "aud" not in to_encode:
+        to_encode["aud"] = JWT_AUDIENCE
     expire = _utc_expiry(expires_delta)
-    to_encode.update({"exp": expire})
+    to_encode.update({"exp": expire, "iat": datetime.now(timezone.utc), "jti": str(uuid.uuid4())})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
@@ -34,23 +43,66 @@ def create_refresh_token(user_id: int, refresh_version: int) -> str:
     to_encode = {
         "sub": str(user_id),
         "ver": str(refresh_version),
+        "typ": "refresh",
         "exp": expire,
+        "iat": datetime.now(timezone.utc),
+        "jti": str(uuid.uuid4()),
     }
+    if JWT_ISSUER:
+        to_encode["iss"] = JWT_ISSUER
+    if JWT_AUDIENCE:
+        to_encode["aud"] = JWT_AUDIENCE
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-def decode_token(token: str) -> Optional[Dict[str, Any]]:
+
+def _decode_token(
+    token: str,
+    *,
+    expected_type: str | None,
+) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    decode_kwargs: dict[str, Any] = {"algorithms": [ALGORITHM]}
+    if JWT_ISSUER:
+        decode_kwargs["issuer"] = JWT_ISSUER
+    if JWT_AUDIENCE:
+        decode_kwargs["audience"] = JWT_AUDIENCE
+
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload
+        payload = jwt.decode(token, SECRET_KEY, **decode_kwargs)
+    except ExpiredSignatureError:
+        logger.info("[decode_token] token expired")
+        return None, "expired_token"
     except JWTError as e:
         logger.info(f"[decode_token] JWT error: {e}")
-        return None
+        return None, "invalid_token"
+
+    if expected_type and payload.get("typ") != expected_type:
+        logger.info("[decode_token] unexpected token type")
+        return None, "invalid_token"
+
+    if not payload.get("sub"):
+        logger.info("[decode_token] missing subject claim")
+        return None, "invalid_token"
+
+    return payload, None
+
+
+def decode_token(token: str) -> Optional[Dict[str, Any]]:
+    payload, _ = _decode_token(token, expected_type="access")
+    return payload
+
+
+def decode_token_with_error(token: str) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    return _decode_token(token, expected_type="access")
+
+
+def decode_refresh_token_with_error(token: str) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    return _decode_token(token, expected_type="refresh")
     
 def get_user_info_from_token(token: str) -> Optional[Tuple[Optional[str], Optional[str]]]:
     """
-    Reads common identity info from access token, returns (sub. email)
+    Reads common identity info from access token, returns (sub, email).
     """
     payload = decode_token(token)
     if not payload:
         return None
-    return payload.get("sub"), payload.get("device_token")
+    return payload.get("sub"), payload.get("email")

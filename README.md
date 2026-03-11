@@ -1,147 +1,134 @@
-#🔐 ALEX – PII Sentinel API
-A real-time, machine learning-powered privacy scanner to detect and redact Personally Identifiable Information (PII) from structured datasets.
+# ALEX Privacy Scanning Platform
 
-🚀 Key Features
-📁 Upload CSVs and auto-detect sensitive data
+ALEX is a FastAPI + React application for scanning uploaded datasets, detecting PII, redacting sensitive values, and providing downloadable outputs and audit-style reports.
 
-🧠 Predict PII columns using an XGBoost classifier trained for high accuracy
+## Current Capabilities
 
-✂️ Instantly redact sensitive fields using AI + regex pattern detection
+- WebAuthn passkey authentication
+- Access token + refresh token session flow (refresh token in `HttpOnly` cookie)
+- File upload and scan pipeline:
+  - parse data
+  - detect PII
+  - redact sensitive values
+  - compute risk score
+  - persist scan metadata
+- Tenant-aware scan access control
+- Download endpoints for redacted files and HTML/PDF reports
+- Admin company overview endpoint with analytics summaries
+- Company settings endpoint (plan-gated)
+- Audit event feed endpoint (plan-gated)
+- Public product pages: Home, Trust, About, Careers, Pricing
 
-🔎 Covers emails, SSNs, IPs, phone numbers, and more
+## Architecture
 
-🪪 Returns a risk score based on detected sensitivity
+- Backend: FastAPI + SQLAlchemy
+- Frontend: React + Tailwind CSS
+- Database: SQLAlchemy `DATABASE_URL` (SQLite fallback for local development)
 
-📊 Feature-rich ML pipeline with custom value-based and metadata engineering
+## Security Notes
 
-🧰 Built-in CLI tools for terminal use cases
+- Passkeys are used for authentication (no password login flow in current implementation).
+- Refresh tokens are stored in `HttpOnly` cookies with `SameSite=strict`.
+- Cookie `secure` flag is enabled in production and disabled in local development.
+- Protected routes require bearer access tokens.
+- Scan/report download routes enforce tenant-aware authorization checks.
 
-📦 Modular FastAPI setup for rapid integration
+## Rate Limits and Quotas
 
-🧠 Model Performance
-We’ve transitioned to XGBoost with expanded features and a cleaned dataset.
+- Tier-based scan limits are enforced server-side.
+- Plan-based defaults:
+  - Free: `1` scan/day, `5MB` upload limit
+  - Pro: `100` scans/day, `10MB` upload limit
+  - Business: `500` scans/day, `25MB` upload limit
 
-✅ Accuracy
-Achieved ~99.7–100% accuracy on internal validation sets with class_weight="balanced"
+## Runtime Requirements
 
-Optimized for real-world columns using actual PII/non-PII structures
+Required environment variables:
 
-Performance tracked via confusion matrix & prediction heatmaps
+- `SECRET_KEY`
 
-📈 API Output (/predict)
-Returns:
+Production-only required variables:
 
-```
-{
-  "filename": "example.csv",
-  "pii_columns": ["email", "ssn"],
-  "risk_score": "67%",
-  "redacted_file": "redacted/example.csv"
-}
-```
-🛠️ Usage Guide
-1. Train the Model
-```
-python models/train_xgboost_model.py
-Make sure pii_column.csv is present for initial training.
-```
+- `DATABASE_URL`
 
-2. Start the API
-```
-uvicorn pii_app:app --reload
-Visit: localhost:8000/docs
-```
+Recommended environment variables:
 
-3. Upload & Redact
-Upload .csv
+- `ENV` (`development` or `production`)
+- `ACCESS_TOKEN_EXPIRE_MINUTES`
+- `REFRESH_TOKEN_EXPIRE_MINUTES`
+- `CHALLENGE_TTL_MINUTES`
+- `ORIGIN`
+- `RP_ID`
+- `RP_NAME`
+- `CORS_ORIGINS`
+- `LOG_LEVEL`
+- `LOG_MAX_BYTES`
+- `LOG_BACKUP_COUNT`
+- `ENABLE_STARTUP_SCHEMA_BOOTSTRAP` (set to `true` only for explicit local bootstrap)
 
-View detected columns
+## Startup Validation
 
-Get downloadable redacted file + risk score
+On startup, ALEX validates:
 
-📁 Project Structure
-```
-ALEX/
-├── pii_app.py                # FastAPI app
-├── models/
-│   ├── train_model.py
-│   └── pii_features.py
-├── utils/
-│   └── redaction.py
-├── uploads/                 # Raw file uploads
-├── redacted/                # Cleaned/redacted CSVs
-├── logs/                    # API logs
-├── test_user_document.csv   # Sample test file
-├── README.md
-```
-📆 Recent Updates (April 13, 2025)
-✅ Switched to XGBoost classifier with enhanced metadata + value feature extraction
+- environment/auth settings
+- database connectivity
+- required schema state
+- writable directories (`uploads`, `redacted`, `logs`)
+- required assets (including report font)
+- PDF report dependency availability
 
-✅ Achieved ~100% test accuracy on core test dataset
+If required schema/tables/columns are missing, startup fails fast with a clear error.
 
-✅ Device trust token table added for user auth enhancement
+## Local Development
 
-✅ Web frontend built using React + Tailwind
+1. Install dependencies for backend and frontend.
+2. Configure `.env` for local development.
+3. Start backend:
 
-✅ Added routing, login/register pages, navbar, and improved UI/UX polish
-
-🧾 Roadmap
-```
-🔍 UX Features
-✅ Redacted preview & download link
-
-🧪 User confirmation on flagged fields
-
-🧠 Feature explanation toggle (why a field was flagged)
-
-⚙️ CLI Tools
-✅ --redact flag to batch redact via command line
-
-⏳ --explain and --risk flags for detailed CLI results
-
-📈 Analytics
-📊 Log false positive rates and accuracy trends
-
-🧮 Save confusion matrix per retraining session
-
-📋 Dashboard with scan stats and performance metrics
-
-📂 Format Support
-✅ CSV support
-
-⏳ XLSX & JSON support coming soon
-
-🔐 Advanced Privacy Modes
-⏳ Differential Privacy toggle for pseudonymization
-
-✅ Regex + ML hybrid redaction in production
-
-⏳ Tiered client privacy templates (configurable rules)
-```
-```
-🌲 Custom Real-Time Random Tree Model
-ALEX previously leveraged a custom Random Tree (RT) model for real-time PII classification. This lightweight model was optimized for speed and interpretability, making it ideal for early detection use cases and on-device processing.
-Key highlights:
-🧠 Trained using a curated set of metadata and content-based features
-⚡ Ultra-fast inference times suited for real-time scanning
-🔍 Clear decision paths to explain why a column was flagged as PII
-🧪 Served as a foundation before transitioning to more advanced ensemble models like XGBoost
-While ALEX has since upgraded its core model, the RT implementation proved essential for validating key detection strategies and setting the groundwork for more accurate PII protection.
-It will continue to evolve as part of a multi-layered, AI-driven pipeline designed to ensure robust, privacy-first data handling.
-/model/archive/train_random_forest.py
+```bash
+uvicorn main:app --reload
 ```
 
-🤝 Contribute
-Have an idea, pattern, or feedback?
+4. Start frontend:
 
-Open an issue
+```bash
+cd frontend
+npm start
+```
 
-Suggest a regex rule
+## API Notes
 
-Submit training samples or label improvements
+- Upload/scan route: `POST /predict/`
+- Current user route: `GET /protected/me`
+- Scan list route: `GET /scans`
+- Admin overview route: `GET /admin/overview`
+- Admin audit feed route: `GET /admin/audit-events`
+- Security dashboard route: `GET /admin/security-dashboard`
+- Incident feed route: `GET /admin/incidents`
+- Company settings routes:
+  - `GET /admin/company-settings`
+  - `PUT /admin/company-settings`
+- Protected asset routes:
+  - `GET /scans/{scan_id}/download`
+  - `GET /scans/{scan_id}/report/html`
+  - `GET /scans/{scan_id}/report/pdf`
 
-👤 Author
-Bo Harris
-Privacy Engineer | ML Explorer | Ethical Tech Advocate
-📫 bo.k.harris@gmail.com
+## Scope Clarification
 
+This repository currently focuses on a production-minded beta foundation and does not yet include:
+
+- billing/subscription management
+- full audit log explorer UI
+
+## Security Controls
+
+The current architecture includes additive enterprise security controls intended to support audit readiness without claiming certification:
+
+- Centralized immutable-style audit logging via `audit_logs`
+- Role-aware authorization with `user`, `organization_admin`, and `security_admin` access controls
+- Scan lifecycle retention fields on `scan_results` for active, archived, and expired states
+- Security alert generation for suspicious login activity, token abuse patterns, and excessive scan activity
+- Global request IDs, structured request logging, HTTPS enforcement in production, and standard web security headers
+- Basic incident tracking via `security_incidents`
+- distributed background worker processing
+- globally distributed rate limiting infrastructure

@@ -4,12 +4,15 @@ import "./index.css";
 import App from "./App";
 import reportWebVitals from "./reportWebVitals";
 import ErrorBoundary from "./components/ErrorBoundary";
+import { DisplayPreferencesProvider } from "./context/DisplayPreferencesContext";
 
 const root = ReactDOM.createRoot(document.getElementById("root"));
 root.render(
   <React.StrictMode>
     <ErrorBoundary>
-      <App />
+      <DisplayPreferencesProvider>
+        <App />
+      </DisplayPreferencesProvider>
     </ErrorBoundary>
   </React.StrictMode>
 );

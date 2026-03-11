@@ -5,22 +5,23 @@ export default function TextField({
   value,
   onChange,
   placeholder,
+  className = "",
+  ...props
 }) {
   return (
     <div className="flex flex-col gap-1">
-      <label
-        htmlFor={id}
-        className="text-sm font-medium text-gray-700 text-white"
-      >
+      <label htmlFor={id} className="text-sm font-medium text-app">
         {label}
       </label>
       <input
         id={id}
+        name={id}
         type={type}
         value={value}
         onChange={onChange}
         placeholder={placeholder}
-        className="border border-gray-600 rounded px-3 py-2 bg-gray-800 text-white"
+        className={`w-full rounded-xl border border-app bg-app px-3 py-2 text-app placeholder:text-app-muted focus-visible:outline-none ${className}`}
+        {...props}
       />
     </div>
   );

@@ -1,7 +1,9 @@
 import { apiUrl } from "./api";
+import { readResponseData } from "./http";
+import { clearAccessToken, getAccessToken, setAccessToken } from "./tokenStore";
 
 export async function authFetch(path, options = {}) {
-  let token = localStorage.getItem("access_token");
+  let token = getAccessToken();
 
   const doRequest = async (accessToken) => {
     return fetch(apiUrl(path), {
@@ -26,12 +28,16 @@ export async function authFetch(path, options = {}) {
   });
 
   if (!refreshResponse.ok) {
-    localStorage.removeItem("access_token");
+    clearAccessToken();
     throw new Error("Session expired. Please log in again.");
   }
 
-  const data = await refreshResponse.json();
-  localStorage.setItem("access_token", data.access_token);
+  const { data } = await readResponseData(refreshResponse);
+  if (!data?.access_token) {
+    clearAccessToken();
+    throw new Error("Session expired. Please log in again.");
+  }
+  setAccessToken(data.access_token);
 
   token = data.access_token;
 

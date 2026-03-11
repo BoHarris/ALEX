@@ -5,12 +5,15 @@ import libsql_client
 
 load_dotenv()
 
-DB_URL = os.environ["TURSO_DATABASE_URL"]
-TOKEN = os.environ["TURSO_AUTH_TOKEN"]
+DB_URL = (os.getenv("DATABASE_URL") or "").strip()
+TOKEN = (os.getenv("TURSO_AUTH_TOKEN") or "").strip() or None
+if not DB_URL:
+    raise RuntimeError("DATABASE_URL is required for db_smoke_test.py")
 
 
 async def main():
-    client = libsql_client.create_client(DB_URL, auth_token=TOKEN)
+    kwargs = {"auth_token": TOKEN} if TOKEN else {}
+    client = libsql_client.create_client(DB_URL, **kwargs)
     try:
         rs = await client.execute("select 1")
         print(rs.rows)

@@ -19,8 +19,10 @@ from sqlalchemy.exc import IntegrityError
 
 from database.database import SessionLocal
 from database.models.scan_results import ScanResult
+from services.retention_service import build_retention_expiration, resolve_retention_days
+from services.audit_service import record_audit_event
 from utils.constants import SUPPORTED_EXTENSIONS
-from utils.redaction import scan_and_redact_column_with_count
+from utils.redaction import scan_and_redact_column_with_details
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,7 @@ PHONE_RE = re.compile(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}")
 SSN_RE = re.compile(r"\d{3}-\d{2}-\d{4}")
 IP_RE = re.compile(r"(?:\d{1,3}\.){3}\d{1,3}")
 STREET_SUFFIXES = {"st", "street", "ave", "road", "rd", "blvd", "ln", "lane"}
+MAX_FEATURE_SAMPLE_VALUES = max(3, int(os.getenv("FEATURE_SAMPLE_VALUES", "15")))
 
 
 @dataclass(frozen=True)
@@ -45,9 +48,10 @@ class ScanPipelineResult:
     filename: str
     pii_columns: list[str]
     redacted_file: str
-    risk_score: float
+    risk_score: int
     redacted_count: int
     total_values: int
+    redacted_type_counts: dict[str, int]
     scan_id: int
 
 
@@ -153,7 +157,17 @@ def _build_feature_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]
     x["has_at"] = x["column"].apply(lambda col: int("@" in col))
     x["has_email_keyword"] = x["column"].apply(lambda col: int("email" in col.lower()))
 
-    value_samples = [df[col].dropna().astype(str).head(3).tolist() for col in df.columns]
+    # Sample values across each column (head/mid/tail) to reduce sparse/late-row PII misses.
+    def column_sample_values(series: pd.Series) -> list[str]:
+        values = series.dropna().astype(str)
+        if values.empty:
+            return []
+        if len(values) <= MAX_FEATURE_SAMPLE_VALUES:
+            return values.tolist()
+        indices = np.linspace(0, len(values) - 1, num=MAX_FEATURE_SAMPLE_VALUES, dtype=int)
+        return values.iloc[indices].tolist()
+
+    value_samples = [column_sample_values(df[col]) for col in df.columns]
     x["parsed_values"] = value_samples
 
     def pct_match(regex: re.Pattern, values: list[str]) -> float:
@@ -219,14 +233,67 @@ def _write_redacted_file(redacted_df: pd.DataFrame, redacted_path: str, ext: str
         redacted_df.to_csv(redacted_path, index=False)
 
 
+def _predict_pii_columns(df: pd.DataFrame) -> list[str]:
+    x, features = _build_feature_dataframe(df)
+    predictions = xgb_model.predict(
+        x[
+            [
+                "length",
+                "num_underscores",
+                "num_digits",
+                "has_at",
+                "has_email_keyword",
+                "pct_email_like",
+                "pct_phone_like",
+                "pct_ssn_like",
+                "pct_ip_like",
+                "avg_digits_per_val",
+                "avg_val_len",
+                "has_dob_pattern",
+                "has_gender_term",
+                "has_street_suffix",
+                "has_city_name",
+                "has_known_name",
+                "has_zip_pattern",
+                "has_phone_pattern",
+            ]
+        ]
+    )
+    return [col for col, is_pii in zip(features, predictions) if is_pii == 0]
+
+
+def _apply_redactions(
+    df: pd.DataFrame,
+    pii_columns: list[str],
+    aggressive: bool,
+) -> tuple[pd.DataFrame, int, int, dict[str, int]]:
+    redacted_df = df.copy()
+    total_redacted = 0
+    total_values = 0
+    redacted_type_counts: dict[str, int] = {}
+
+    for col in pii_columns:
+        redacted_col, redacted_count, col_total, _, column_type_counts = scan_and_redact_column_with_details(
+            df[col], col, aggressive=aggressive
+        )
+        redacted_df[col] = redacted_col
+        total_redacted += redacted_count
+        total_values += col_total
+        for label, count in column_type_counts.items():
+            redacted_type_counts[label] = redacted_type_counts.get(label, 0) + count
+
+    return redacted_df, total_redacted, total_values, redacted_type_counts
+
+
 def _persist_scan_result(
     *,
     context: ScanContext,
     filename: str,
     ext: str,
-    risk_score: float,
+    risk_score: int,
     pii_columns: list[str],
     total_redacted: int,
+    redacted_type_counts: dict[str, int],
     public_redacted_path: str,
 ) -> int:
     db = None
@@ -239,10 +306,16 @@ def _persist_scan_result(
             company_id=context.company_id,
             filename=filename,
             file_type=ext.lstrip("."),
-            risk_score=int(risk_score * 100),
+            risk_score=risk_score,
             pii_types_found=pii_types_string,
+            redacted_type_counts=json.dumps(redacted_type_counts) if redacted_type_counts else None,
             total_pii_found=total_redacted,
             redacted_file_path=public_redacted_path,
+            status="active",
+            retention_expiration=build_retention_expiration(
+                scanned_at=None,
+                retention_days=resolve_retention_days(db, context.company_id, context.tier),
+            ),
         )
 
         db.add(scan)
@@ -254,6 +327,22 @@ def _persist_scan_result(
             context.user_id,
             filename,
         )
+        record_audit_event(
+            db,
+            company_id=context.company_id,
+            user_id=context.user_id,
+            event_type="scan_created",
+            event_category="scan",
+            description=f"Scan created for file {filename}.",
+            target_type="scan",
+            target_id=str(scan.id),
+            event_metadata={
+                "file_type": ext.lstrip("."),
+                "risk_score": risk_score,
+                "total_redacted": total_redacted,
+            },
+        )
+        db.commit()
         return scan.id
     except IntegrityError as exc:
         if db is not None:
@@ -295,52 +384,18 @@ def run_scan_pipeline(
     os.makedirs("redacted", exist_ok=True)
 
     df = _parse_to_dataframe(file_bytes=file_bytes, filename=filename, ext=ext)
-    x, features = _build_feature_dataframe(df)
-
-    predictions = xgb_model.predict(
-        x[
-            [
-                "length",
-                "num_underscores",
-                "num_digits",
-                "has_at",
-                "has_email_keyword",
-                "pct_email_like",
-                "pct_phone_like",
-                "pct_ssn_like",
-                "pct_ip_like",
-                "avg_digits_per_val",
-                "avg_val_len",
-                "has_dob_pattern",
-                "has_gender_term",
-                "has_street_suffix",
-                "has_city_name",
-                "has_known_name",
-                "has_zip_pattern",
-                "has_phone_pattern",
-            ]
-        ]
+    pii_columns = _predict_pii_columns(df)
+    redacted_df, total_redacted, total_values, redacted_type_counts = _apply_redactions(
+        df,
+        pii_columns,
+        aggressive,
     )
-
-    pii_columns = [col for col, is_pii in zip(features, predictions) if is_pii == 0]
-
-    redacted_df = df.copy()
-    total_redacted = 0
-    total_values = 0
-
-    for col in pii_columns:
-        redacted_col, redacted_count, col_total, _ = scan_and_redact_column_with_count(
-            df[col], col, aggressive=aggressive
-        )
-        redacted_df[col] = redacted_col
-        total_redacted += redacted_count
-        total_values += col_total
 
     file_id = str(uuid.uuid4())
     redacted_path = os.path.join("redacted", f"redacted_{file_id}{ext}")
     _write_redacted_file(redacted_df=redacted_df, redacted_path=redacted_path, ext=ext)
 
-    risk_score = round(min(total_redacted / total_values, 1.0), 2) if total_values > 0 else 0.0
+    risk_score = min(round((total_redacted / total_values) * 100), 100) if total_values > 0 else 0
 
     scan_id = _persist_scan_result(
         context=context,
@@ -349,7 +404,16 @@ def run_scan_pipeline(
         risk_score=risk_score,
         pii_columns=pii_columns,
         total_redacted=total_redacted,
+        redacted_type_counts=redacted_type_counts,
         public_redacted_path=redacted_path,
+    )
+
+    logger.info(
+        "Completed scan id=%s user_id=%s file=%s redacted_total=%s",
+        scan_id,
+        context.user_id,
+        filename,
+        total_redacted,
     )
 
     return ScanPipelineResult(
@@ -359,5 +423,6 @@ def run_scan_pipeline(
         risk_score=risk_score,
         redacted_count=total_redacted,
         total_values=total_values,
+        redacted_type_counts=redacted_type_counts,
         scan_id=scan_id,
     )

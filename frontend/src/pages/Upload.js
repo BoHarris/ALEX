@@ -7,9 +7,9 @@ function Upload() {
   const [supportedFileTypes] = React.useState(SUPPORTED_EXTENSIONS);
 
   return (
-    <div className="flex flex-col gap-4 items-center justify-center py-12">
-      <h1 className="text-2xl font-bold">Upload</h1>
-      <p className="text-gray-500 text-sm">
+    <div className="page-shell flex flex-col items-center justify-center gap-4 py-12">
+      <h1 className="text-2xl font-bold text-app">Upload</h1>
+      <p className="text-app-secondary text-sm">
         Upload your files to scan for PII data.
         <br />
         <span className="font-medium"> Supported file types:</span>
