@@ -22,7 +22,7 @@ export function useComplianceWorkspace(enabled = true) {
   const [timelineCache, setTimelineCache] = useState({});
 
   const loadWorkspace = useCallback(async () => {
-    const [me, overview, directory, pages, vendors, incidents, risks, reviews, assignments, tests, modules, auditLog, codeReviews] = await Promise.all([
+    const [me, overview, directory, pages, vendors, incidents, risks, reviews, assignments, tests, modules, auditLog, codeReviews, privacyPosture] = await Promise.all([
       requestComplianceJson("/compliance/me"),
       requestComplianceJson("/compliance/overview"),
       requestComplianceJson("/compliance/directory"),
@@ -36,8 +36,9 @@ export function useComplianceWorkspace(enabled = true) {
       requestComplianceJson("/compliance/training/modules"),
       requestComplianceJson("/compliance/audit-log"),
       requestComplianceJson("/compliance/code-reviews"),
+      requestComplianceJson("/privacy/posture").catch(() => null),
     ]);
-    return { me, overview, directory, pages, vendors, incidents, risks, reviews, assignments, tests, modules, auditLog, codeReviews };
+    return { me, overview, directory, pages, vendors, incidents, risks, reviews, assignments, tests, modules, auditLog, codeReviews, privacyPosture };
   }, []);
 
   useEffect(() => {

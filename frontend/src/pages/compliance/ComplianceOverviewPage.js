@@ -1,4 +1,5 @@
 import { Link } from "react-router-dom";
+import PrivacyPostureCard from "../../components/compliance/PrivacyPostureCard";
 import SummaryMetricCard from "../../components/compliance/SummaryMetricCard";
 import WorkspaceEmptyState from "../../components/compliance/WorkspaceEmptyState";
 import { useCompliancePageContext } from "./useCompliancePageContext";
@@ -21,9 +22,12 @@ export default function ComplianceOverviewPage() {
   const summary = overview.summary || {};
   const testing = overview.testing_summary || [];
   const codeReviewSnapshot = overview.code_review_snapshot || [];
+  const posture = data?.privacyPosture || null;
 
   return (
     <div className="space-y-6">
+      <PrivacyPostureCard posture={posture} />
+
       <section className="grid gap-4 md:grid-cols-3 xl:grid-cols-3">
         <SummaryMetricCard label="Policies" value={summary.policy_coverage ?? 0} />
         <SummaryMetricCard label="Vendors" value={summary.vendor_risk_status ?? 0} />

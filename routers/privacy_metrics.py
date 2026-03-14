@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from database.database import get_db
 from dependencies.tier_guard import require_company_admin
 from services.privacy_metrics_service import get_privacy_metrics
+from services.privacy_posture_service import get_privacy_posture
 
 router = APIRouter(tags=["Privacy Metrics"])
 
@@ -17,6 +18,19 @@ def privacy_metrics(
     db: Session = Depends(get_db),
 ):
     return get_privacy_metrics(
+        db,
+        company_id=current_user["company_id"],
+        activity_window_days=activity_window_days,
+    )
+
+
+@router.get("/privacy/posture")
+def privacy_posture(
+    activity_window_days: int = Query(default=30, ge=1, le=365),
+    current_user: dict = Depends(require_company_admin),
+    db: Session = Depends(get_db),
+):
+    return get_privacy_posture(
         db,
         company_id=current_user["company_id"],
         activity_window_days=activity_window_days,
