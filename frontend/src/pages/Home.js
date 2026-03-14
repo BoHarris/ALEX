@@ -1,15 +1,25 @@
-import React from "react";
-import AnimatedLoginSVG from "../components/animatedHeading";
-function Home() {
+import ApiSection from "../components/home/ApiSection";
+import CallToActionSection from "../components/home/CallToActionSection";
+import CapabilitiesSection from "../components/home/CapabilitiesSection";
+import HeroSection from "../components/home/HeroSection";
+import HowItWorksSection from "../components/home/HowItWorksSection";
+import ProblemSection from "../components/home/ProblemSection";
+import ProductPreviewSection from "../components/home/ProductPreviewSection";
+import SecuritySection from "../components/home/SecuritySection";
+
+export default function Home() {
   return (
-    <div className="min-h-screen bg-gray-900 flex flex-col items-center justify-center text-white">
-      <AnimatedLoginSVG />
-      <p className="mt-6 text-center text-gray-400 max-w-md">
-        ALEX is your privacy-sidekick, helping you detect and redact PII while
-        enhancing data protection. Navigate to your dashboard to get started.
-      </p>
+    <div className="page-shell px-4 py-8 sm:px-6 lg:px-8">
+      <div className="mx-auto max-w-7xl space-y-24 pb-16">
+        <HeroSection />
+        <ProblemSection />
+        <HowItWorksSection />
+        <CapabilitiesSection />
+        <ProductPreviewSection />
+        <ApiSection />
+        <SecuritySection />
+        <CallToActionSection />
+      </div>
     </div>
   );
 }
-
-export default Home;
