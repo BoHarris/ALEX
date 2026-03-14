@@ -41,7 +41,7 @@ describe("DashboardFilesPanel", () => {
   });
 
   test("opens action menu and archives a scan", async () => {
-    const user = userEvent.setup();
+    const user = userEvent;
     const onArchiveScan = jest.fn().mockResolvedValue(undefined);
 
     render(
@@ -61,7 +61,7 @@ describe("DashboardFilesPanel", () => {
   });
 
   test("shows restore action for archived scans", async () => {
-    const user = userEvent.setup();
+    const user = userEvent;
     const onRestoreScan = jest.fn().mockResolvedValue(undefined);
 
     render(

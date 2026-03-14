@@ -6,6 +6,7 @@ import mimetypes
 import os
 import re
 import uuid
+import warnings
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -14,7 +15,9 @@ from typing import Iterator, Optional
 import joblib
 import numpy as np
 import pandas as pd
-from PyPDF2 import PdfReader
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", message="PyPDF2 is deprecated.*", category=DeprecationWarning)
+    from PyPDF2 import PdfReader
 from docx import Document
 from sqlalchemy.exc import IntegrityError
 
@@ -498,8 +501,9 @@ def _parse_to_dataframe(
 
 def _iter_csv_like_chunks(*, source_path: str, ext: str, chunk_rows: int) -> Iterator[pd.DataFrame]:
     separator = "\t" if ext == ".tsv" else ","
-    for chunk in pd.read_csv(source_path, chunksize=chunk_rows, sep=separator):
-        yield chunk
+    with open(source_path, "r", encoding="utf-8", errors="ignore", newline="") as handle:
+        for chunk in pd.read_csv(handle, chunksize=chunk_rows, sep=separator):
+            yield chunk
 
 
 def _iter_text_chunks(*, source_path: str, chunk_rows: int) -> Iterator[pd.DataFrame]:

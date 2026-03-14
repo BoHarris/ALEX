@@ -537,7 +537,7 @@ def test_test_dashboard_inventory_and_history_support_management_views():
     detail = compliance_router.get_test_case_detail(test_id, current_employee=_employee_context(employee), db=session)
     history = compliance_router.get_test_case_history(test_id, current_employee=_employee_context(employee), db=session)
 
-    assert dashboard["summary"]["total_tests"] == 2
+    assert dashboard["summary"]["total_tests"] >= 2
     assert dashboard["summary"]["flaky_tests"] == 1
     assert dashboard["categories"][0]["category"] == "privacy tests"
     assert inventory["summary"]["flaky"] == 1
@@ -951,3 +951,21 @@ def test_code_review_block_and_list_include_prompt_and_files():
     assert review_payload["review"]["prompt_text"] == "Tighten CSP and verify frontend compatibility."
     assert review_payload["review"]["files_impacted"] == ["main.py", "services/request_context.py"]
     assert review_payload["record"]["status"] == "Blocked"
+
+
+def test_inventory_includes_discovered_repo_tests_without_execution_history():
+    session = _session()
+    _, _, employee = _seed_org(session)
+
+    inventory = compliance_router.list_managed_test_inventory(
+        category="UI tests",
+        search="ComplianceTestingPage",
+        sort="name",
+        current_employee=_employee_context(employee),
+        db=session,
+    )
+
+    matching = [item for item in inventory["tests"] if "ComplianceTestingPage.test.js" in str(item.get("file_path") or "")]
+    assert matching
+    assert all(item["status"] == "not_run" for item in matching)
+    assert any("renders individual tests" in item["test_name"] for item in matching)

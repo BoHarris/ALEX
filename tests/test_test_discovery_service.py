@@ -1,6 +1,11 @@
 from pathlib import Path
 
-from services.test_discovery_service import build_test_node_id, discover_pytest_cases, split_test_node_id
+from services.test_discovery_service import (
+    build_test_node_id,
+    discover_pytest_cases,
+    discover_repository_tests,
+    split_test_node_id,
+)
 
 
 def test_discover_pytest_cases_returns_individual_functions_and_methods():
@@ -30,6 +35,44 @@ class TestRiskSignals:
     finally:
         if test_file.exists():
             test_file.unlink()
+
+
+def test_discover_repository_tests_includes_python_and_jest_cases():
+    root = Path(".test_tmp/repository_discovery_case")
+    py_file = root / "tests" / "test_generated_suite.py"
+    js_file = root / "frontend" / "src" / "Example.test.js"
+    try:
+        py_file.parent.mkdir(parents=True, exist_ok=True)
+        js_file.parent.mkdir(parents=True, exist_ok=True)
+        py_file.write_text(
+            """
+def test_detect_email():
+    assert True
+""".strip(),
+            encoding="utf-8",
+        )
+        js_file.write_text(
+            """
+describe("Upload page", () => {
+  test("renders controls", () => {});
+});
+""".strip(),
+            encoding="utf-8",
+        )
+
+        discovered = discover_repository_tests(root)
+        node_ids = {item["node_id"] for item in discovered}
+        assert "tests/test_generated_suite.py::test_detect_email" in node_ids
+        assert "frontend/src/Example.test.js::Upload page::renders controls" in node_ids
+    finally:
+        if root.exists():
+            for path in sorted(root.rglob("*"), reverse=True):
+                if path.is_file():
+                    path.unlink()
+                elif path.is_dir():
+                    path.rmdir()
+            if root.exists():
+                root.rmdir()
 
 
 def test_build_and_split_test_node_id_round_trip():

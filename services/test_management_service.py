@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from statistics import mean
 from urllib.parse import quote, unquote
@@ -12,10 +13,10 @@ from database.models.compliance_test_run import ComplianceTestRun
 from services.test_failure_task_service import get_failure_task_for_test
 from services.test_discovery_service import (
     build_test_node_id,
-    discover_pytest_cases,
     infer_test_category,
     normalize_test_file_path,
     split_test_node_id,
+    discover_repository_tests,
 )
 
 CATEGORY_DESCRIPTIONS = {
@@ -154,6 +155,48 @@ def _compute_trend(history: list[dict[str, object]]) -> str:
     return "stable"
 
 
+def _build_discovered_test_inventory_item(discovered_test: dict[str, str | None]) -> dict[str, object]:
+    test_name = str(discovered_test.get("test_name") or "")
+    file_path = normalize_test_file_path(discovered_test.get("file_path"))
+    node_id = str(discovered_test.get("node_id") or build_test_node_id(test_name=test_name, file_path=file_path))
+    category = str(discovered_test.get("category") or infer_test_category(file_path, test_name))
+    suite_name = Path(file_path).name if file_path else category
+    return {
+        "test_id": encode_test_id(node_id=node_id, test_name=test_name),
+        "test_node_id": node_id,
+        "test_name": test_name,
+        "category": category,
+        "suite_name": suite_name,
+        "status": "not_run",
+        "description": discovered_test.get("description"),
+        "file_path": file_path,
+        "file_name": file_path,
+        "expected_result": None,
+        "actual_result": None,
+        "confidence_score": None,
+        "latest_environment": "repository",
+        "total_runs": 0,
+        "passed_runs": 0,
+        "failed_runs": 0,
+        "skipped_runs": 0,
+        "pass_rate": 0.0,
+        "flake_rate": 0.0,
+        "flaky": False,
+        "quality_label": "Not Run",
+        "average_duration_ms": None,
+        "last_duration_ms": None,
+        "last_run_timestamp": None,
+        "last_successful_run": None,
+        "last_failed_run": None,
+        "latest_failure_reason": None,
+        "current_pass_streak": 0,
+        "current_fail_streak": 0,
+        "trend": "not_run",
+        "history": [],
+        "latest_execution": None,
+    }
+
+
 def _summarize_test_history(node_id: str, rows: list[tuple[ComplianceTestCaseResult, ComplianceTestRun]]) -> dict[str, object]:
     ordered_rows = sorted(
         rows,
@@ -241,15 +284,16 @@ def _build_test_inventory(db: Session, *, organization_id: int) -> list[dict[str
         node_id: _summarize_test_history(node_id, rows)
         for node_id, rows in grouped.items()
     }
-    discovered_by_node_id = {str(item["node_id"]): item for item in discover_pytest_cases()}
-    for node_id, current in inventory_by_node_id.items():
-        discovered_test = discovered_by_node_id.get(node_id)
-        if not discovered_test:
+    discovered_by_node_id = {str(item["node_id"]): item for item in discover_repository_tests()}
+    for node_id, discovered_test in discovered_by_node_id.items():
+        current = inventory_by_node_id.get(node_id)
+        if current is None:
+            inventory_by_node_id[node_id] = _build_discovered_test_inventory_item(discovered_test)
             continue
         if not current.get("description") and discovered_test.get("description"):
             current["description"] = discovered_test["description"]
-        current["file_path"] = discovered_test["file_path"]
-        current["file_name"] = discovered_test["file_path"]
+        current["file_path"] = normalize_test_file_path(discovered_test.get("file_path"))
+        current["file_name"] = normalize_test_file_path(discovered_test.get("file_path"))
         if current.get("category") in {None, "", "integration tests"}:
             current["category"] = discovered_test["category"]
     inventory = list(inventory_by_node_id.values())
