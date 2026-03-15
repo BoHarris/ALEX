@@ -548,8 +548,8 @@ export default function ComplianceEmployeesPage() {
                 </h3>
                 <p className="mt-3 text-sm text-app-secondary">
                   Department or job title is still missing. The employee record
-                  can stay in the directory, but governance follow-up work will
-                  remain easier to track once the profile is complete.
+                  can stay in the directory, but governance workflows are easier
+                  to manage once the profile is complete.
                 </p>
               </section>
             ) : null}
@@ -619,26 +619,6 @@ export default function ComplianceEmployeesPage() {
                     ? "Employee inactive"
                     : "Deactivate Employee"}
                 </Button>
-                <Button onClick={createEmployeeTask}>Create follow-up task</Button>
-              </div>
-            </section>
-            <section className="surface-card rounded-3xl p-5">
-              <h3 className="text-lg font-semibold text-app">Linked Tasks</h3>
-              <div className="mt-4 flex flex-wrap gap-2">
-                {selectedTasks.length ? (
-                  selectedTasks.map((task) => (
-                    <LinkedTaskPill
-                      key={task.id}
-                      label={`${task.task_key} ${task.status}`}
-                      onClick={() => navigate("/compliance/tasks")}
-                      tone="accent"
-                    />
-                  ))
-                ) : (
-                  <p className="text-sm text-app-muted">
-                    No employee governance tasks linked yet.
-                  </p>
-                )}
               </div>
             </section>
             <section className="surface-card rounded-3xl p-5">
