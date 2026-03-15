@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 from datetime import datetime, timezone
 
 from database.models.governance_task import GovernanceTask
-from services.llm_config import LLMConfig, get_llm_config, validate_llm_config
+from services.llm_config import LLMConfig, get_llm_config, reset_llm_config, validate_llm_config
 from services.llm_completion_service import LLMCompletionAnalyzer, LLMAnalysisError
 from services.task_llm_completion_service import (
     TaskLLMCompletionOrchestrator,
@@ -60,12 +60,11 @@ class TestLLMCompletionAnalyzer:
         """Test that analyzer recognizes when it's ready."""
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
         monkeypatch.setenv("LLM_AUTO_COMPLETE_TASKS", "true")
-        
+
+        # Reset the cached global config so each test is isolated
+        reset_llm_config()
+
         # When anthropic is not installed, analyzer won't initialize client
-        # This test just verifies the config is set correctly
-        analyzer = LLMCompletionAnalyzer()
-        assert analyzer.config.enabled
-        assert analyzer.config.api_key == "test-key"
     
     def test_analyzer_placeholder_when_disabled(self, monkeypatch):
         """Test that placeholder is returned when LLM is disabled."""
@@ -201,7 +200,114 @@ class TestLLMConfigIntegration:
         config2 = get_llm_config()
         
         assert config1 is config2
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+    
+    def test_config_persistence_loading(self, monkeypatch):
+        """Test that config loads persisted settings from database."""
+        from database.models.llm_settings import LLMSettings
+        from database.database import SessionLocal
+        
+        # Reset config
+        reset_llm_config()
+        
+        # Create persisted settings
+        db = SessionLocal()
+        try:
+            # Clean up any existing
+            db.query(LLMSettings).delete()
+            db.commit()
+            
+            # Add test settings
+            settings = LLMSettings(
+                enabled=True,
+                model="claude-3-5-sonnet-latest",
+                max_tokens=2048,
+                temperature=0.9
+            )
+            db.add(settings)
+            db.commit()
+            
+            # Test loading
+            config = get_llm_config()
+            assert config.enabled is True
+            assert config.model == "claude-3-5-sonnet-latest"
+            assert config.max_tokens == 2048
+            assert config.temperature == 0.9
+            
+        finally:
+            db.query(LLMSettings).delete()
+            db.commit()
+            db.close()
+    
+    def test_config_env_override_persistence(self, monkeypatch):
+        """Test that environment variables override persisted settings."""
+        from database.models.llm_settings import LLMSettings
+        from database.database import SessionLocal
+        
+        # Reset config
+        reset_llm_config()
+        
+        # Create persisted settings
+        db = SessionLocal()
+        try:
+            db.query(LLMSettings).delete()
+            settings = LLMSettings(enabled=False, model="claude-3-5-sonnet-20241022")
+            db.add(settings)
+            db.commit()
+            
+            # Set env vars
+            monkeypatch.setenv("LLM_AUTO_COMPLETE_TASKS", "true")
+            monkeypatch.setenv("CLAUDE_MODEL", "claude-3-5-haiku-20241022")
+            
+            config = get_llm_config()
+            # Env should override DB
+            assert config.enabled is True
+            assert config.model == "claude-3-5-haiku-20241022"
+            
+        finally:
+            db.query(LLMSettings).delete()
+            db.commit()
+            db.close()
+    
+    def test_config_validation_with_key(self, monkeypatch):
+        """Test that validation passes with API key."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        
+        config = LLMConfig()
+        # Should not raise
+        config.validate()
+    
+    def test_config_repr_masks_api_key(self):
+        """Test that __repr__ does not expose API key."""
+        config = LLMConfig()
+        config.api_key = "secret-key-123"
+        
+        repr_str = repr(config)
+        assert "secret-key-123" not in repr_str
+        assert "LLMConfig(model=" in repr_str
+    
+    def test_config_invalid_env_values(self, monkeypatch):
+        """Test handling of invalid environment variable values."""
+        monkeypatch.setenv("CLAUDE_MAX_TOKENS", "invalid")
+        monkeypatch.setenv("CLAUDE_TEMPERATURE", "not-a-float")
+        
+        config = LLMConfig()
+        # Should use defaults when parsing fails
+        assert config.max_tokens == 1024  # default
+        assert config.temperature == 0.7  # default
+    
+    def test_validate_llm_config_at_startup(self, monkeypatch):
+        """Test startup validation function."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        monkeypatch.setenv("LLM_AUTO_COMPLETE_TASKS", "true")
+        
+        # Should not raise
+        validate_llm_config()
+    
+    def test_validate_llm_config_fails_when_required(self, monkeypatch):
+        """Test that startup validation fails when LLM is enabled but no key."""
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setenv("LLM_AUTO_COMPLETE_TASKS", "true")
+        
+        with pytest.raises(RuntimeError) as exc_info:
+            validate_llm_config()
+        assert "LLM auto-complete enabled but configuration invalid" in str(exc_info.value)

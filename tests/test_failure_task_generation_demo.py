@@ -1,89 +1,55 @@
 """
 Demonstration: Automatic Task Generation from Test Failures
 
-This test file demonstrates how the system automatically generates governance tasks
-when tests fail. When you run pytest on this suite, any failures will automatically
-create tasks in the governance task system.
+This test file exists to verify the core utility functions that support the
+application and to ensure they behave as expected during CI runs.
 
-To run these tests:
-    pytest tests/test_failure_task_generation_demo.py -v
-    
-To see generated tasks, check the governance_tasks table:
-    SELECT * FROM governance_tasks WHERE source_type = 'test_failure' ORDER BY created_at DESC;
+For real product validation, this file is intended to exercise small, deterministic
+behaviors (e.g., role normalization and key hashing) without requiring an external
+service or database access.
 """
-import pytest
+
+from utils.api_key_auth import generate_api_key_secret, hash_api_key
+from utils.rbac import get_role_permissions, has_any_role, normalize_role
 
 
-@pytest.mark.task_generation
-def test_database_connection():
-    """
-    A sample test that should pass.
-    No task will be generated for passing tests.
-    """
-    assert True
+def test_normalize_role_known_values():
+    """Ensure role normalization maps known aliases to canonical values."""
+    assert normalize_role("admin") == "organization_admin"
+    assert normalize_role("Security_Admin") == "security_admin"
+    assert normalize_role("Member") == "user"
+    assert normalize_role(None) == "user"
 
 
-@pytest.mark.task_generation
-def test_api_response_validation():
-    """
-    A sample test that will fail and generate a task.
-    The task will contain details about why this test failed.
-    """
-    # This will fail and trigger task generation
-    expected = 200
-    actual = 500
-    assert actual == expected, f"API returned {actual}, expected {expected}"
+def test_get_role_permissions_security_admin():
+    """Security admins should have all elevated permissions."""
+    perms = get_role_permissions("security_admin")
+    assert perms.can_access_admin
+    assert perms.can_manage_users
+    assert perms.can_view_audit_logs
+    assert perms.can_change_system_config
+    assert perms.can_access_security_dashboard
 
 
-@pytest.mark.task_generation
-def test_data_integrity_check():
-    """
-    Another sample test that will fail.
-    Each failure generates a separate task.
-    """
-    data = {"status": "error"}
-    assert data["status"] == "success", "Data integrity check failed"
+def test_has_any_role_matches_aliases():
+    """The helper should treat role aliases as equivalent when checking membership."""
+    assert has_any_role("admin", "organization_admin")
+    assert has_any_role("member", "user")
+    assert not has_any_role("auditor", "security_admin", "organization_admin")
 
 
-@pytest.mark.task_generation  
-def test_performance_threshold():
-    """
-    Sample performance test that will fail.
-    """
-    response_time = 5000  # milliseconds
-    max_allowed = 1000
-    assert response_time <= max_allowed, f"Response time {response_time}ms exceeds threshold {max_allowed}ms"
+def test_api_key_hashing_is_stable_and_deterministic():
+    """Hashing an API key should be deterministic and stable across calls."""
+    raw = "test-api-key"
+    first = hash_api_key(raw)
+    second = hash_api_key(raw)
+    assert first == second
+    assert len(first) == 64  # sha256 hex digest length
 
 
-class TestFeatureIntegration:
-    """Test class with multiple tests that can each generate tasks on failure."""
-    
-    @pytest.mark.task_generation
-    def test_user_registration_flow(self):
-        """Test user registration integration."""
-        user_created = False
-        assert user_created, "User registration failed"
-    
-    @pytest.mark.task_generation
-    def test_authentication_token_generation(self):
-        """Test authentication token generation."""
-        token = None
-        assert token is not None, "Failed to generate authentication token"
-    
-    @pytest.mark.task_generation
-    def test_permission_verification(self):
-        """Test permission verification."""
-        has_permission = False
-        assert has_permission, "User does not have required permissions"
-
-
-# Example of a test that would pass (no task generated)
-@pytest.mark.task_generation
-def test_library_import():
-    """This test passes, so no task will be generated."""
-    import sys
-    assert sys.version_info.major >= 3
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v", "-s"])
+def test_generate_api_key_secret_format():
+    """Generated secrets should use the expected prefix and be URL-safe."""
+    secret = generate_api_key_secret()
+    assert secret.startswith("alex_")
+    # Ensure it is URL-safe (no spaces, should be safe for headers/URLs)
+    assert " " not in secret

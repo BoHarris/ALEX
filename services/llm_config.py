@@ -1,8 +1,14 @@
 """
 Configuration and initialization for LLM (Claude Anthropic) services.
 """
+import logging
 import os
 from typing import Optional
+
+from database.database import SessionLocal
+from database.models.llm_settings import LLMSettings
+
+logger = logging.getLogger(__name__)
 
 
 class LLMConfigError(Exception):
@@ -23,6 +29,7 @@ class LLMConfig:
     def validate(self) -> None:
         """Validate configuration. Raises LLMConfigError if invalid."""
         if not self.api_key:
+            logger.error("LLM configuration validation failed: ANTHROPIC_API_KEY environment variable is not set")
             raise LLMConfigError(
                 "ANTHROPIC_API_KEY environment variable is not set. "
                 "LLM services will not be available."
@@ -34,8 +41,7 @@ class LLMConfig:
     
     def __repr__(self) -> str:
         return (
-            f"LLMConfig(model={self.model}, enabled={self.enabled}, "
-            f"api_key={'***' if self.api_key else 'None'})"
+            f"LLMConfig(model={self.model}, enabled={self.enabled})"
         )
 
 
@@ -48,7 +54,29 @@ def get_llm_config() -> LLMConfig:
     global _config
     if _config is None:
         _config = LLMConfig()
+        # Load persisted settings from database if available
+        try:
+            db = SessionLocal()
+            settings = db.query(LLMSettings).first()
+            if settings:
+                _config.enabled = settings.enabled
+                _config.model = settings.model
+                _config.max_tokens = settings.max_tokens
+                _config.temperature = settings.temperature
+            db.close()
+        except Exception as e:
+            logger.warning(f"Failed to load LLM settings from database: {e}")
     return _config
+
+
+def reset_llm_config() -> None:
+    """Reset the cached global LLM configuration.
+
+    This is useful for tests or long-running processes that need to re-read
+    environment variables.
+    """
+    global _config
+    _config = None
 
 
 def validate_llm_config() -> None:

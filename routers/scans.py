@@ -138,7 +138,7 @@ def _sanitize_dataframe_for_spreadsheet(frame: pd.DataFrame) -> pd.DataFrame:
     frame_str = frame.astype(str)
     
     # Vectorized formula detection: any cell starting with =, +, -, or @
-    formula_mask = frame_str.str.match(r'^\s*[=+\-@]', na=False)
+    formula_mask = frame_str.apply(lambda col: col.str.match(r'^\s*[=+\-@]', na=False))
     
     # Prefix detected formulas with single quote
     frame_copy = frame.copy()

@@ -6,10 +6,12 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any, Optional
 
 from database.models.governance_task import GovernanceTask
 from services.llm_config import get_llm_config, LLMConfigError
+from services.llm_metrics_service import record_llm_call
 
 logger = logging.getLogger(__name__)
 
@@ -84,31 +86,83 @@ All suggestions should be specific, plausible, and reference concrete deliverabl
             context = self._build_task_context(task)
             user_prompt = self._build_analysis_prompt(context)
             
-            # Call Claude API
-            logger.debug(f"Calling Claude API for task {task.id}")
-            message = self.client.messages.create(
-                model=self.config.model,
-                max_tokens=self.config.max_tokens,
-                temperature=self.config.temperature,
-                system=self.SYSTEM_PROMPT,
-                messages=[
-                    {"role": "user", "content": user_prompt}
-                ],
-            )
+            # Call Claude API with retry and metrics tracking
+            logger.info(f"Starting LLM analysis for task {task.id} using model {self.config.model}")
+            start_time = time.time()
+            message = self._call_claude_with_retry(user_prompt)
+            elapsed_ms = (time.time() - start_time) * 1000
             
-            # Parse response
+            # Parse response and extract token usage
             response_text = message.content[0].text
             result = self._parse_claude_response(response_text)
             
-            logger.info(f"LLM analysis completed for task {task.id}")
+            # Record metrics
+            usage = getattr(message, 'usage', None)
+            input_tokens = usage.input_tokens if usage else 0
+            output_tokens = usage.output_tokens if usage else 0
+            total_tokens = input_tokens + output_tokens
+            
+            record_llm_call(
+                success=True,
+                latency_ms=elapsed_ms,
+                tokens_used=total_tokens,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
+            
+            logger.info(f"LLM analysis completed successfully for task {task.id} in {elapsed_ms:.2f}ms")
             return result
             
         except (APIError, APIConnectionError) as e:
-            logger.error(f"Claude API error analyzing task {task.id}: {e}")
+            # Record metrics for failed call
+            error_type = type(e).__name__
+            record_llm_call(success=False, latency_ms=0, error_type=error_type)
+            logger.error(f"Claude API error analyzing task {task.id}: {error_type}: {str(e)}")
             raise LLMAnalysisError(f"Claude API error: {str(e)}") from e
         except Exception as e:
-            logger.error(f"Unexpected error analyzing task {task.id}: {e}")
+            # Record metrics for unexpected error
+            error_type = type(e).__name__
+            record_llm_call(success=False, latency_ms=0, error_type=error_type)
+            logger.error(f"Unexpected error analyzing task {task.id}: {error_type}: {str(e)}")
             raise LLMAnalysisError(f"Analysis failed: {str(e)}") from e
+    
+    def _call_claude_with_retry(self, user_prompt: str):
+        """Call Claude API with exponential backoff retry for transient failures."""
+        max_retries = 3
+        base_delay = 1.0  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                logger.debug(f"Claude API call attempt {attempt + 1}/{max_retries}")
+                return self.client.messages.create(
+                    model=self.config.model,
+                    max_tokens=self.config.max_tokens,
+                    temperature=self.config.temperature,
+                    system=self.SYSTEM_PROMPT,
+                    messages=[
+                        {"role": "user", "content": user_prompt}
+                    ],
+                )
+            except APIConnectionError as e:
+                # Network errors - retry
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(f"Network error on attempt {attempt + 1}, retrying in {delay:.1f}s: {str(e)}")
+                    time.sleep(delay)
+                else:
+                    raise
+            except APIError as e:
+                # Check if it's a retryable error (rate limit or server error)
+                if hasattr(e, 'status_code') and e.status_code in (429, 500, 502, 503, 504):
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2 ** attempt)
+                        logger.warning(f"Retryable API error ({e.status_code}) on attempt {attempt + 1}, retrying in {delay:.1f}s: {str(e)}")
+                        time.sleep(delay)
+                    else:
+                        raise
+                else:
+                    # Non-retryable error
+                    raise
     
     @staticmethod
     def _build_task_context(task: GovernanceTask) -> dict[str, Any]:

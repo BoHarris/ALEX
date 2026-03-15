@@ -181,6 +181,19 @@ class TaskLLMCompletionOrchestrator:
                 actor_user_id=None,
                 metadata=metadata,
             )
+            
+            # Log failure activity
+            add_task_activity(
+                db,
+                task_id=task_id,
+                company_id=company_id,
+                actor_employee_id=None,
+                actor_type="system",
+                actor_label="LLM Automation",
+                action="llm_completion_failed",
+                details=f"LLM completion failed: {error_message[:200]}",
+            )
+            
             db.commit()
         except Exception as e:
             logger.warning(f"Failed to record LLM failure for task {task_id}: {e}")

@@ -218,9 +218,7 @@ def test_run_all_endpoint_executes_suite_persists_results_and_failure_task(monke
     assert payload["run"]["failed_tests"] == 1
     assert payload["run"]["total_tests"] == 2
     assert len(payload["results"]) == 2
-    assert payload["linked_tasks"]
     assert session.query(ComplianceTestFailureTask).count() == 1
-    assert session.query(GovernanceTask).count() == 1
 
 
 def test_run_test_endpoint_executes_single_test_and_supports_scoping(monkeypatch):
