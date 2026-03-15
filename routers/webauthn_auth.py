@@ -677,13 +677,16 @@ def webauthn_register_verify(
         )
     except Exception:
         request_context = extract_request_security_context(request)
-        register_failed_login(
-            db,
-            email=registration.email,
-            organization_id=registration.company_id,
-            user_id=None,
-            context=request_context,
-        )
+        try:
+            register_failed_login(
+                db,
+                email=registration.email,
+                organization_id=registration.company_id,
+                user_id=None,
+                context=request_context,
+            )
+        except Exception:
+            db.rollback()
         record_audit_event(
             db,
             company_id=registration.company_id,

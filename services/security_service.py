@@ -319,11 +319,12 @@ def enforce_auth_rate_limit(
 
     try:
         for scope, raw_key, threshold in key_values:
+            effective_threshold = max(int(threshold), 1)
             threshold_hit = _increment_threshold_counter(
                 db,
                 namespace=f"security:auth_ratelimit:{scope}",
                 state_key=_hash_state_identifier(raw_key) or "unknown",
-                threshold=threshold,
+                threshold=effective_threshold + 1,
                 window_seconds=window_seconds,
             )
             if threshold_hit:

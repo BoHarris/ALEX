@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from html import escape
 import io
@@ -36,7 +36,7 @@ def _format_scanned_at(scanned_at: datetime | None) -> str:
 
 
 def _format_generated_at() -> str:
-    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    return datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
 def _display_file_type(scan: ScanResult) -> str:

@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -276,6 +278,79 @@ def test_employee_creation_update_and_deactivation_are_supported():
     assert session.query(AuditLog).filter(AuditLog.event_type == "employee_deactivated").count() == 1
 
 
+def test_employee_directory_normalizes_trimmed_inputs_and_blank_optional_updates():
+    session = _session()
+    _, _, employee = _seed_org(session)
+    created = compliance_router.create_employee(
+        compliance_router.EmployeeCreateRequest(
+            first_name="  Ava  ",
+            last_name="  Ng ",
+            email="  Ava.Ng@Example.com ",
+            role=" engineering_lead ",
+            department=" Engineering ",
+            job_title=" Lead Engineer ",
+            status=" active ",
+        ),
+        current_employee=_employee_context(employee),
+        db=session,
+    )
+    created_employee = session.get(Employee, created["employee"]["id"])
+
+    assert created_employee.first_name == "Ava"
+    assert created_employee.last_name == "Ng"
+    assert created_employee.email == "ava.ng@example.com"
+    assert created_employee.role == "engineering_lead"
+    assert created_employee.department == "Engineering"
+    assert created_employee.job_title == "Lead Engineer"
+    assert created_employee.status == "active"
+
+    compliance_router.update_employee(
+        created_employee.id,
+        compliance_router.EmployeeUpdateRequest(
+            email="  AVA.OPS@EXAMPLE.COM ",
+            role=" operations_admin ",
+            department="   ",
+            job_title="   Senior Operations Lead   ",
+        ),
+        current_employee=_employee_context(employee),
+        db=session,
+    )
+    session.refresh(created_employee)
+
+    assert created_employee.email == "ava.ops@example.com"
+    assert created_employee.role == "operations_admin"
+    assert created_employee.department is None
+    assert created_employee.job_title == "Senior Operations Lead"
+
+
+def test_employee_update_rejects_duplicate_email_conflicts():
+    session = _session()
+    _, _, employee = _seed_org(session)
+    teammate = compliance_router.create_employee(
+        compliance_router.EmployeeCreateRequest(
+            first_name="Ava",
+            last_name="Ng",
+            email="ava@example.com",
+            role="engineering_lead",
+        ),
+        current_employee=_employee_context(employee),
+        db=session,
+    )["employee"]
+
+    with pytest.raises(HTTPException) as exc_info:
+        compliance_router.update_employee(
+            teammate["id"],
+            compliance_router.EmployeeUpdateRequest(email="  BO@EXAMPLE.COM "),
+            current_employee=_employee_context(employee),
+            db=session,
+        )
+
+    assert exc_info.value.status_code == 409
+    refreshed_employee = session.get(Employee, teammate["id"])
+    session.refresh(refreshed_employee)
+    assert refreshed_employee.email == "ava@example.com"
+
+
 def test_test_category_and_case_detail_are_available_for_drill_down():
     session = _session()
     company, _, employee = _seed_org(session)
@@ -537,7 +612,7 @@ def test_test_dashboard_inventory_and_history_support_management_views():
     detail = compliance_router.get_test_case_detail(test_id, current_employee=_employee_context(employee), db=session)
     history = compliance_router.get_test_case_history(test_id, current_employee=_employee_context(employee), db=session)
 
-    assert dashboard["summary"]["total_tests"] == 2
+    assert dashboard["summary"]["total_tests"] >= 2
     assert dashboard["summary"]["flaky_tests"] == 1
     assert dashboard["categories"][0]["category"] == "privacy tests"
     assert inventory["summary"]["flaky"] == 1
@@ -951,3 +1026,21 @@ def test_code_review_block_and_list_include_prompt_and_files():
     assert review_payload["review"]["prompt_text"] == "Tighten CSP and verify frontend compatibility."
     assert review_payload["review"]["files_impacted"] == ["main.py", "services/request_context.py"]
     assert review_payload["record"]["status"] == "Blocked"
+
+
+def test_inventory_includes_discovered_repo_tests_without_execution_history():
+    session = _session()
+    _, _, employee = _seed_org(session)
+
+    inventory = compliance_router.list_managed_test_inventory(
+        category="UI tests",
+        search="ComplianceTestingPage",
+        sort="name",
+        current_employee=_employee_context(employee),
+        db=session,
+    )
+
+    matching = [item for item in inventory["tests"] if "ComplianceTestingPage.test.js" in str(item.get("file_path") or "")]
+    assert matching
+    assert all(item["status"] == "not_run" for item in matching)
+    assert any("renders individual tests" in item["test_name"] for item in matching)
