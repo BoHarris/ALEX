@@ -37,6 +37,12 @@ tmp/
 temp/
 .cache/
 
+# Test artifacts
+pytest-cache-files-*/
+pytest_tmp_local/
+tmprqzltib8/
+.test_tmp_exec_*/
+
 # Local databases and data files
 *.db
 *.sqlite
