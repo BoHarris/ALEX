@@ -18,6 +18,8 @@ class GovernanceTask(Base):
     source_module = Column(String, nullable=False, default="manual", index=True)
     incident_id = Column(Integer, ForeignKey("grc_incidents.id"), nullable=True, index=True)
     assignee_employee_id = Column(Integer, ForeignKey("employees.id"), nullable=True, index=True)
+    assignee_type = Column(String, nullable=True, index=True)
+    assignee_label = Column(String, nullable=True)
     reporter_employee_id = Column(Integer, ForeignKey("employees.id"), nullable=True, index=True)
     due_date = Column(DateTime(timezone=True), nullable=True, index=True)
     metadata_json = Column(Text, nullable=True)

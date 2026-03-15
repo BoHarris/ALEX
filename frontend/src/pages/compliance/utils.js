@@ -20,6 +20,32 @@ export function formatDate(value) {
   return date.toLocaleDateString();
 }
 
+export function formatStatusLabel(value) {
+  const normalized = (value || "").toLowerCase();
+  if (!normalized) {
+    return "Not set";
+  }
+  const labels = {
+    todo: "To do",
+    in_progress: "In progress",
+    ready_for_review: "Ready for review",
+  };
+  if (labels[normalized]) {
+    return labels[normalized];
+  }
+  return normalized
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+export function formatTaskPriorityLabel(value) {
+  const normalized = (value || "").toLowerCase();
+  if (!normalized) {
+    return "Not set";
+  }
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
 export function statusTone(status = "") {
   const normalized = status.toLowerCase();
   if (["failed", "high", "critical", "closed", "inactive", "archived", "revoked", "degrading", "failing", "regressed", "canceled", "overdue"].includes(normalized)) {
@@ -27,6 +53,9 @@ export function statusTone(status = "") {
   }
   if (["completed", "approved", "published", "active", "passed", "stable", "improving", "low", "done"].includes(normalized)) {
     return "text-emerald-600";
+  }
+  if (["ready_for_review"].includes(normalized)) {
+    return "text-blue-300";
   }
   if (["pending", "todo", "investigating", "in_review", "flagged", "skipped", "not_run", "resolved", "medium", "queued"].includes(normalized)) {
     return "text-amber-600";
@@ -44,6 +73,9 @@ export function statusBadgeClass(status = "") {
   }
   if (["completed", "approved", "published", "active", "passed", "stable", "improving", "low", "done"].includes(normalized)) {
     return "bg-emerald-500/15 text-emerald-300 border border-emerald-400/30";
+  }
+  if (["ready_for_review"].includes(normalized)) {
+    return "bg-blue-500/15 text-blue-200 border border-blue-400/30";
   }
   if (["pending", "todo", "investigating", "in_review", "flagged", "skipped", "not_run", "resolved", "medium", "queued"].includes(normalized)) {
     return "bg-amber-500/15 text-amber-200 border border-amber-400/30";

@@ -11,6 +11,8 @@ class GovernanceTaskActivity(Base):
     task_id = Column(Integer, ForeignKey("governance_tasks.id"), nullable=False, index=True)
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     actor_employee_id = Column(Integer, ForeignKey("employees.id"), nullable=True, index=True)
+    actor_type = Column(String, nullable=True, index=True)
+    actor_label = Column(String, nullable=True)
     action = Column(String, nullable=False, index=True)
     from_value = Column(String, nullable=True)
     to_value = Column(String, nullable=True)

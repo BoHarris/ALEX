@@ -70,6 +70,17 @@ from services.governance_task_service import (
     summarize_tasks,
     update_task as update_governance_task,
 )
+from services.automated_changes_service import (
+    assign_task_to_automation,
+    block_automation_task,
+    list_automation_tasks,
+    mark_task_ready_for_review,
+    start_automation_task,
+    start_next_automation_task,
+    sync_backlog_tasks,
+    update_automation_task_metadata,
+    return_task_to_backlog,
+)
 from services.test_failure_task_service import ensure_failure_task_for_test, get_failure_task_for_test, update_failure_task
 from services.test_discovery_service import build_test_node_id, normalize_test_file_path, split_test_node_id
 from services.test_execution_service import (
@@ -522,6 +533,39 @@ def _display_field_name(info: ValidationInfo) -> str:
     return (info.field_name or "field").replace("_", " ")
 
 
+TASK_STATUS_VALUES = {"todo", "in_progress", "blocked", "ready_for_review", "done", "canceled"}
+TASK_PRIORITY_VALUES = {"low", "medium", "high", "critical"}
+
+
+def _normalize_task_status(value: str, *, field_name: str = "status") -> str:
+    normalized = _normalize_required_text(value, field_name=field_name).lower()
+    if normalized not in TASK_STATUS_VALUES:
+        allowed = ", ".join(sorted(TASK_STATUS_VALUES))
+        raise ValueError(f"{field_name} must be one of: {allowed}")
+    return normalized
+
+
+def _normalize_task_priority(value: str, *, field_name: str = "priority") -> str:
+    normalized = _normalize_required_text(value, field_name=field_name).lower()
+    if normalized not in TASK_PRIORITY_VALUES:
+        allowed = ", ".join(sorted(TASK_PRIORITY_VALUES))
+        raise ValueError(f"{field_name} must be one of: {allowed}")
+    return normalized
+
+
+def _employee_for_company_or_404(db: Session, employee_id: int, organization_id: int) -> Employee:
+    employee = db.query(Employee).filter(Employee.id == employee_id, Employee.company_id == organization_id).first()
+    if employee is None:
+        raise HTTPException(status_code=404, detail=error_payload(detail="Employee not found", error_code="not_found"))
+    return employee
+
+
+def _raise_automation_error(exc: ValueError) -> None:
+    message = str(exc) or "Automation workflow action could not be completed"
+    status_code = 404 if "not found" in message.lower() else 409
+    raise HTTPException(status_code=status_code, detail=error_payload(detail=message, error_code="conflict" if status_code == 409 else "not_found")) from exc
+
+
 class EmployeeCreateRequest(BaseModel):
     first_name: str
     last_name: str
@@ -635,6 +679,31 @@ class TaskCreateRequest(BaseModel):
     due_date: datetime | None = None
     metadata: dict = Field(default_factory=dict)
 
+    @field_validator("title")
+    @classmethod
+    def validate_task_title(cls, value: str) -> str:
+        return _normalize_required_text(value, field_name="title")
+
+    @field_validator("description", "source_id")
+    @classmethod
+    def normalize_optional_task_text(cls, value: str | None) -> str | None:
+        return _normalize_optional_text(value)
+
+    @field_validator("status")
+    @classmethod
+    def validate_task_status(cls, value: str) -> str:
+        return _normalize_task_status(value)
+
+    @field_validator("priority")
+    @classmethod
+    def validate_task_priority(cls, value: str) -> str:
+        return _normalize_task_priority(value)
+
+    @field_validator("source_type", "source_module")
+    @classmethod
+    def normalize_required_task_source_text(cls, value: str, info: ValidationInfo) -> str:
+        return _normalize_required_text(value, field_name=_display_field_name(info)).lower()
+
 
 class TaskUpdateRequest(BaseModel):
     title: str | None = None
@@ -646,6 +715,32 @@ class TaskUpdateRequest(BaseModel):
     incident_id: int | None = None
     metadata: dict | None = None
 
+    @field_validator("title")
+    @classmethod
+    def validate_optional_task_title(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _normalize_required_text(value, field_name="title")
+
+    @field_validator("description")
+    @classmethod
+    def normalize_optional_task_description(cls, value: str | None) -> str | None:
+        return _normalize_optional_text(value)
+
+    @field_validator("status")
+    @classmethod
+    def validate_optional_task_status(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _normalize_task_status(value)
+
+    @field_validator("priority")
+    @classmethod
+    def validate_optional_task_priority(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _normalize_task_priority(value)
+
 
 class TaskAssignRequest(BaseModel):
     assignee_employee_id: int | None = None
@@ -653,6 +748,11 @@ class TaskAssignRequest(BaseModel):
 
 class TaskStatusRequest(BaseModel):
     status: str
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, value: str) -> str:
+        return _normalize_task_status(value)
 
 
 class TaskLinkIncidentRequest(BaseModel):
@@ -664,6 +764,16 @@ class TaskLinkSourceRequest(BaseModel):
     source_id: str
     source_module: str
 
+    @field_validator("source_type", "source_module")
+    @classmethod
+    def normalize_source_link_text(cls, value: str, info: ValidationInfo) -> str:
+        return _normalize_required_text(value, field_name=_display_field_name(info)).lower()
+
+    @field_validator("source_id")
+    @classmethod
+    def validate_source_link_id(cls, value: str) -> str:
+        return _normalize_required_text(value, field_name="source id")
+
 
 class SourceTaskCreateRequest(BaseModel):
     title: str | None = None
@@ -671,6 +781,46 @@ class SourceTaskCreateRequest(BaseModel):
     priority: str | None = None
     assignee_employee_id: int | None = None
     due_date: datetime | None = None
+
+    @field_validator("title")
+    @classmethod
+    def validate_optional_source_task_title(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _normalize_required_text(value, field_name="title")
+
+    @field_validator("description")
+    @classmethod
+    def normalize_optional_source_task_description(cls, value: str | None) -> str | None:
+        return _normalize_optional_text(value)
+
+    @field_validator("priority")
+    @classmethod
+    def validate_optional_source_task_priority(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _normalize_task_priority(value)
+
+
+class AutomationMetadataRequest(BaseModel):
+    branch_name: str | None = None
+    commit_message: str | None = None
+    implementation_summary: str | None = None
+    review_notes: str | None = None
+
+    @field_validator("branch_name", "commit_message", "implementation_summary", "review_notes")
+    @classmethod
+    def normalize_automation_text(cls, value: str | None) -> str | None:
+        return _normalize_optional_text(value)
+
+
+class AutomationBlockRequest(BaseModel):
+    reason: str | None = None
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_reason(cls, value: str | None) -> str | None:
+        return _normalize_optional_text(value)
 
 
 @router.get("/me")
@@ -981,6 +1131,156 @@ def get_governance_task_summary(current_employee: dict = Depends(require_complia
     }
 
 
+@router.get("/automation/tasks")
+def get_automation_queue(current_employee: dict = Depends(require_compliance_workspace_access), db: Session = Depends(get_db)):
+    return list_automation_tasks(db, company_id=current_employee["organization_id"])
+
+
+@router.post("/automation/sync-backlog")
+def sync_automation_backlog(current_employee: dict = Depends(require_security_or_compliance_admin), db: Session = Depends(get_db)):
+    try:
+        automation = sync_backlog_tasks(
+            db,
+            company_id=current_employee["organization_id"],
+            actor_user_id=current_employee["user_id"],
+        )
+    except ValueError as exc:
+        _raise_automation_error(exc)
+    db.commit()
+    return {"automation": automation}
+
+
+@router.post("/automation/tasks/start-next")
+def start_next_automation_work(current_employee: dict = Depends(require_security_or_compliance_admin), db: Session = Depends(get_db)):
+    try:
+        task = start_next_automation_task(
+            db,
+            company_id=current_employee["organization_id"],
+            actor_user_id=current_employee["user_id"],
+        )
+    except ValueError as exc:
+        _raise_automation_error(exc)
+    if task is None:
+        raise HTTPException(status_code=409, detail=error_payload(detail="No eligible automation task is ready to start.", error_code="conflict"))
+    db.commit()
+    return {"task": task, "automation": list_automation_tasks(db, company_id=current_employee["organization_id"])}
+
+
+@router.post("/automation/tasks/{task_id}/assign")
+def assign_backlog_task_to_automation(task_id: int, current_employee: dict = Depends(require_security_or_compliance_admin), db: Session = Depends(get_db)):
+    try:
+        task = assign_task_to_automation(
+            db,
+            company_id=current_employee["organization_id"],
+            task_id=task_id,
+            actor_employee_id=current_employee["employee_id"],
+            actor_user_id=current_employee["user_id"],
+        )
+    except ValueError as exc:
+        _raise_automation_error(exc)
+    if task is None:
+        raise HTTPException(status_code=404, detail=error_payload(detail="Task not found", error_code="not_found"))
+    db.commit()
+    return {"task": task}
+
+
+@router.post("/automation/tasks/{task_id}/start")
+def start_automation_work(task_id: int, current_employee: dict = Depends(require_security_or_compliance_admin), db: Session = Depends(get_db)):
+    try:
+        task = start_automation_task(
+            db,
+            company_id=current_employee["organization_id"],
+            task_id=task_id,
+            actor_user_id=current_employee["user_id"],
+        )
+    except ValueError as exc:
+        _raise_automation_error(exc)
+    if task is None:
+        raise HTTPException(status_code=404, detail=error_payload(detail="Task not found", error_code="not_found"))
+    db.commit()
+    return {"task": task}
+
+
+@router.post("/automation/tasks/{task_id}/block")
+def block_automation_work(task_id: int, payload: AutomationBlockRequest, current_employee: dict = Depends(require_security_or_compliance_admin), db: Session = Depends(get_db)):
+    try:
+        task = block_automation_task(
+            db,
+            company_id=current_employee["organization_id"],
+            task_id=task_id,
+            actor_user_id=current_employee["user_id"],
+            reason=payload.reason,
+        )
+    except ValueError as exc:
+        _raise_automation_error(exc)
+    if task is None:
+        raise HTTPException(status_code=404, detail=error_payload(detail="Task not found", error_code="not_found"))
+    db.commit()
+    return {"task": task}
+
+
+@router.post("/automation/tasks/{task_id}/ready-for-review")
+def mark_automation_work_ready_for_review(task_id: int, payload: AutomationMetadataRequest, current_employee: dict = Depends(require_security_or_compliance_admin), db: Session = Depends(get_db)):
+    try:
+        task = mark_task_ready_for_review(
+            db,
+            company_id=current_employee["organization_id"],
+            task_id=task_id,
+            actor_user_id=current_employee["user_id"],
+            branch_name=payload.branch_name,
+            commit_message=payload.commit_message,
+            implementation_summary=payload.implementation_summary,
+            review_notes=payload.review_notes,
+        )
+    except ValueError as exc:
+        _raise_automation_error(exc)
+    if task is None:
+        raise HTTPException(status_code=404, detail=error_payload(detail="Task not found", error_code="not_found"))
+    db.commit()
+    return {"task": task}
+
+
+@router.post("/automation/tasks/{task_id}/return-to-backlog")
+def return_automation_work_to_backlog(task_id: int, payload: AutomationMetadataRequest, current_employee: dict = Depends(require_security_or_compliance_admin), db: Session = Depends(get_db)):
+    try:
+        task = return_task_to_backlog(
+            db,
+            company_id=current_employee["organization_id"],
+            task_id=task_id,
+            actor_employee_id=current_employee["employee_id"],
+            actor_user_id=current_employee["user_id"],
+            review_notes=payload.review_notes,
+        )
+    except ValueError as exc:
+        _raise_automation_error(exc)
+    if task is None:
+        raise HTTPException(status_code=404, detail=error_payload(detail="Task not found", error_code="not_found"))
+    db.commit()
+    return {"task": task}
+
+
+@router.patch("/automation/tasks/{task_id}/metadata")
+def patch_automation_task_metadata(task_id: int, payload: AutomationMetadataRequest, current_employee: dict = Depends(require_security_or_compliance_admin), db: Session = Depends(get_db)):
+    try:
+        task = update_automation_task_metadata(
+            db,
+            company_id=current_employee["organization_id"],
+            task_id=task_id,
+            actor_employee_id=current_employee["employee_id"],
+            actor_user_id=current_employee["user_id"],
+            branch_name=payload.branch_name,
+            commit_message=payload.commit_message,
+            implementation_summary=payload.implementation_summary,
+            review_notes=payload.review_notes,
+        )
+    except ValueError as exc:
+        _raise_automation_error(exc)
+    if task is None:
+        raise HTTPException(status_code=404, detail=error_payload(detail="Task not found", error_code="not_found"))
+    db.commit()
+    return {"task": task}
+
+
 @router.get("/tasks")
 def list_governance_tasks(
     status: str | None = Query(default=None),
@@ -1031,6 +1331,10 @@ def create_governance_task(
     current_employee: dict = Depends(require_security_or_compliance_admin),
     db: Session = Depends(get_db),
 ):
+    if payload.assignee_employee_id is not None:
+        _employee_for_company_or_404(db, payload.assignee_employee_id, current_employee["organization_id"])
+    if payload.incident_id is not None:
+        _incident_or_404(db, payload.incident_id, current_employee["organization_id"])
     task = create_task(
         db,
         company_id=current_employee["organization_id"],
@@ -1070,20 +1374,24 @@ def patch_governance_task(
     current_employee: dict = Depends(require_security_or_compliance_admin),
     db: Session = Depends(get_db),
 ):
+    provided_fields = payload.model_fields_set
+    if "assignee_employee_id" in provided_fields and payload.assignee_employee_id is not None:
+        _employee_for_company_or_404(db, payload.assignee_employee_id, current_employee["organization_id"])
+    if "incident_id" in provided_fields and payload.incident_id is not None:
+        _incident_or_404(db, payload.incident_id, current_employee["organization_id"])
+
+    update_kwargs = {}
+    for field_name in ("title", "description", "status", "priority", "assignee_employee_id", "due_date", "incident_id", "metadata"):
+        if field_name in provided_fields:
+            update_kwargs[field_name] = getattr(payload, field_name)
+
     detail = update_governance_task(
         db,
         company_id=current_employee["organization_id"],
         task_id=task_id,
         actor_employee_id=current_employee["employee_id"],
         actor_user_id=current_employee["user_id"],
-        title=payload.title,
-        description=payload.description,
-        status=payload.status,
-        priority=payload.priority,
-        assignee_employee_id=payload.assignee_employee_id,
-        due_date=payload.due_date,
-        incident_id=payload.incident_id,
-        metadata=payload.metadata,
+        **update_kwargs,
     )
     if detail is None:
         raise HTTPException(status_code=404, detail=error_payload(detail="Task not found", error_code="not_found"))
@@ -1098,6 +1406,8 @@ def assign_governance_task(
     current_employee: dict = Depends(require_security_or_compliance_admin),
     db: Session = Depends(get_db),
 ):
+    if payload.assignee_employee_id is not None:
+        _employee_for_company_or_404(db, payload.assignee_employee_id, current_employee["organization_id"])
     detail = update_governance_task(
         db,
         company_id=current_employee["organization_id"],
@@ -1186,6 +1496,8 @@ def create_task_from_incident(
     db: Session = Depends(get_db),
 ):
     incident, record = _incident_or_404(db, incident_id, current_employee["organization_id"])
+    if payload.assignee_employee_id is not None:
+        _employee_for_company_or_404(db, payload.assignee_employee_id, current_employee["organization_id"])
     task = create_incident_remediation_task(
         db,
         company_id=current_employee["organization_id"],
@@ -1222,6 +1534,8 @@ def create_task_from_vendor(
     db: Session = Depends(get_db),
 ):
     vendor, record = _vendor_or_404(db, vendor_id, current_employee["organization_id"])
+    if payload.assignee_employee_id is not None:
+        _employee_for_company_or_404(db, payload.assignee_employee_id, current_employee["organization_id"])
     task = create_vendor_review_task(
         db,
         company_id=current_employee["organization_id"],
@@ -1266,6 +1580,8 @@ def create_task_from_test_failure(
     current_employee: dict = Depends(require_security_or_compliance_admin),
     db: Session = Depends(get_db),
 ):
+    if payload.assignee_employee_id is not None:
+        _employee_for_company_or_404(db, payload.assignee_employee_id, current_employee["organization_id"])
     detail = get_test_case_detail(test_id, current_employee=current_employee, db=db)
     if detail.get("status") != "failed":
         raise HTTPException(status_code=409, detail=error_payload(detail="Task can only be created for failing tests", error_code="conflict"))
@@ -1306,6 +1622,8 @@ def create_task_from_employee(
     employee = db.query(Employee).filter(Employee.id == employee_id, Employee.company_id == current_employee["organization_id"]).first()
     if employee is None:
         raise HTTPException(status_code=404, detail=error_payload(detail="Employee not found", error_code="not_found"))
+    if payload.assignee_employee_id is not None:
+        _employee_for_company_or_404(db, payload.assignee_employee_id, current_employee["organization_id"])
     task = create_employee_followup_task(
         db,
         company_id=current_employee["organization_id"],

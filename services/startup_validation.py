@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import inspect, text
 
 from database.database import ENV, engine
@@ -14,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 MIGRATIONS_DIR = BASE_DIR / "migrations" / "versions"
+ALEMBIC_INI_PATH = BASE_DIR / "alembic.ini"
 MODEL_PATH = BASE_DIR / "models" / "xgboost_model.pkl"
 FONT_PATH = BASE_DIR / "DejaVuSans.ttf"
 REQUIRED_DIRS = (
@@ -30,8 +33,8 @@ REQUIRED_SCHEMA = {
     "organization_memberships": {"id", "company_id", "user_id", "role", "status", "created_at"},
     "api_keys": {"id", "company_id", "created_by_user_id", "hashed_key", "created_at", "usage_count"},
     "security_events": {"id", "company_id", "user_id", "event_type", "severity", "created_at"},
-    "governance_tasks": {"id", "company_id", "title", "status", "priority", "source_type", "source_module", "created_at"},
-    "governance_task_activities": {"id", "task_id", "company_id", "action", "created_at"},
+    "governance_tasks": {"id", "company_id", "title", "status", "priority", "source_type", "source_module", "assignee_type", "assignee_label", "created_at"},
+    "governance_task_activities": {"id", "task_id", "company_id", "actor_type", "actor_label", "action", "created_at"},
     "webauthn_challenges": {"id", "user_id", "challenge", "challenge_type", "expires_at"},
     "company_settings": {"id", "company_id", "default_policy_label", "allowed_upload_types"},
     "audit_events": {"id", "company_id", "user_id", "event_type", "event_category", "description", "event_metadata", "created_at"},
@@ -178,15 +181,20 @@ def _validate_database() -> None:
         raise RuntimeError("Database connection failed") from exc
 
 
-def _required_schema_revision() -> str:
-    revisions = sorted(path.stem for path in MIGRATIONS_DIR.glob("*.py") if path.name != "__init__.py")
+def _required_schema_revisions() -> set[str]:
+    if not MIGRATIONS_DIR.is_dir():
+        raise RuntimeError("Migration configuration is missing. Create and apply migrations before startup.")
+
+    config = Config(str(ALEMBIC_INI_PATH))
+    config.set_main_option("script_location", str(BASE_DIR / "migrations"))
+    revisions = set(ScriptDirectory.from_config(config).get_heads())
     if not revisions:
         raise RuntimeError("Migration configuration is missing. Create and apply migrations before startup.")
-    return revisions[-1]
+    return revisions
 
 
 def _validate_schema_revision() -> None:
-    expected_revision = _required_schema_revision()
+    expected_revisions = _required_schema_revisions()
     inspector = inspect(engine)
     if not inspector.has_table("alembic_version"):
         raise RuntimeError("Database schema version mismatch. Run migrations before starting the application.")
@@ -194,13 +202,14 @@ def _validate_schema_revision() -> None:
     with engine.connect() as conn:
         revisions = {row[0] for row in conn.execute(text("SELECT version_num FROM alembic_version"))}
 
-    if revisions != {expected_revision}:
+    if revisions != expected_revisions:
+        expected_label = ", ".join(sorted(expected_revisions))
         raise RuntimeError(
             "Database schema version mismatch. "
-            f"Expected revision {expected_revision}; run migrations before starting the application."
+            f"Expected revision set {expected_label}; run migrations before starting the application."
         )
 
-    logger.info("Startup validation: schema revision OK (%s).", expected_revision)
+    logger.info("Startup validation: schema revision OK (%s).", ", ".join(sorted(expected_revisions)))
 
 
 def _validate_schema_state() -> None:

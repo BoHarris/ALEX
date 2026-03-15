@@ -89,7 +89,7 @@ def test_schema_revision_validation_passes_when_revision_matches(monkeypatch):
         conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(255) NOT NULL)"))
         conn.execute(
             text("INSERT INTO alembic_version (version_num) VALUES (:revision)"),
-            {"revision": startup_validation._required_schema_revision()},
+            {"revision": next(iter(startup_validation._required_schema_revisions()))},
         )
 
     monkeypatch.setattr(startup_validation, "engine", engine)

@@ -1,3 +1,7 @@
+from datetime import datetime, timezone
+
+import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -240,3 +244,114 @@ def test_security_event_generates_security_task_and_company_scoping_applies():
     assert len(same_company_tasks) == 1
     assert same_company_tasks[0]["source_module"] == "security"
     assert other_company_tasks["tasks"] == []
+
+
+def test_task_detail_supports_ready_for_review_and_safe_partial_updates():
+    session = _session()
+    _, _, employee = _seed_org(session)
+    context = _employee_context(employee)
+
+    created = compliance_router.create_governance_task(
+        compliance_router.TaskCreateRequest(
+            title="Quarterly access review follow-up",
+            description="Review the remaining privileged access exceptions.",
+            priority="high",
+            assignee_employee_id=employee.id,
+            due_date=datetime(2026, 3, 20, 15, 0, tzinfo=timezone.utc),
+        ),
+        current_employee=context,
+        db=session,
+    )
+
+    task = created["task"]
+    updated = compliance_router.patch_governance_task(
+        task["id"],
+        compliance_router.TaskUpdateRequest(priority="critical"),
+        current_employee=context,
+        db=session,
+    )
+
+    assert updated["task"]["priority"] == "critical"
+    assert updated["task"]["assignee_employee_id"] == employee.id
+    assert updated["task"]["due_date"] is not None
+
+    review_ready = compliance_router.patch_governance_task(
+        task["id"],
+        compliance_router.TaskUpdateRequest(status="ready_for_review"),
+        current_employee=context,
+        db=session,
+    )
+
+    assert review_ready["task"]["status"] == "ready_for_review"
+    assert review_ready["task"]["is_open"] is True
+    assert review_ready["task"]["workflow"]["review_state"] == "pending_review"
+
+    cleared_due_date = compliance_router.patch_governance_task(
+        task["id"],
+        compliance_router.TaskUpdateRequest(due_date=None),
+        current_employee=context,
+        db=session,
+    )
+
+    assert cleared_due_date["task"]["due_date"] is None
+
+
+def test_task_detail_returns_linked_incident_context():
+    session = _session()
+    _, _, employee = _seed_org(session)
+    context = _employee_context(employee)
+
+    created = compliance_router.create_incident(
+        compliance_router.IncidentCreateRequest(
+            title="Suspicious refresh token reuse",
+            severity="high",
+            description="Revoked session token was reused by a browser session.",
+        ),
+        current_employee=context,
+        db=session,
+    )
+
+    tasks = list_source_tasks(session, company_id=employee.company_id, source_type="incident", source_id=str(created["incident_id"]))
+    assert len(tasks) == 1
+
+    detail = compliance_router.get_governance_task(tasks[0]["id"], current_employee=context, db=session)
+
+    assert detail["task"]["incident"]["id"] == created["incident_id"]
+    assert detail["task"]["incident"]["title"] == "Suspicious refresh token reuse"
+    assert detail["task"]["incident"]["url"] == "/compliance/incidents"
+    assert detail["task"]["activity"]
+
+
+def test_task_assignment_requires_same_company_employee_and_detail_is_scoped():
+    session = _session()
+    _, _, employee = _seed_org(session)
+    _other_company, _other_user, other_employee = _seed_org(session, email="grace@example.com", company_name="Beta")
+    context = _employee_context(employee)
+
+    created = compliance_router.create_governance_task(
+        compliance_router.TaskCreateRequest(
+            title="Vendor evidence follow-up",
+            description="Confirm missing evidence before review.",
+        ),
+        current_employee=context,
+        db=session,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        compliance_router.assign_governance_task(
+            created["task"]["id"],
+            compliance_router.TaskAssignRequest(assignee_employee_id=other_employee.id),
+            current_employee=context,
+            db=session,
+        )
+
+    assert exc.value.status_code == 404
+
+    with pytest.raises(HTTPException) as detail_exc:
+        compliance_router.get_governance_task(
+            created["task"]["id"],
+            current_employee=_employee_context(other_employee),
+            db=session,
+        )
+
+    assert detail_exc.value.status_code == 404

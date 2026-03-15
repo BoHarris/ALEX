@@ -36,6 +36,7 @@ export function useComplianceWorkspace(enabled = true) {
       vendors,
       incidents,
       tasks,
+      automation,
       taskSummary,
       risks,
       reviews,
@@ -53,6 +54,7 @@ export function useComplianceWorkspace(enabled = true) {
       requestComplianceJson("/compliance/vendors"),
       requestComplianceJson("/compliance/incidents"),
       requestComplianceJson("/compliance/tasks"),
+      requestComplianceJson("/compliance/automation/tasks"),
       requestComplianceJson("/compliance/tasks/summary"),
       requestComplianceJson("/compliance/risks"),
       requestComplianceJson("/compliance/access-reviews"),
@@ -71,6 +73,7 @@ export function useComplianceWorkspace(enabled = true) {
       vendors,
       incidents,
       tasks,
+      automation,
       taskSummary,
       risks,
       reviews,
@@ -116,18 +119,26 @@ export function useComplianceWorkspace(enabled = true) {
     };
   }, [enabled, loadWorkspace, reloadKey]);
 
-  const mutate = useCallback(
+  const mutateAndReturn = useCallback(
     async (path, body, method = "POST") => {
-      await requestComplianceJson(path, {
+      const payload = await requestComplianceJson(path, {
         method,
         headers: { "Content-Type": "application/json" },
         body: body != null ? JSON.stringify(body) : undefined,
       });
       const nextData = await loadWorkspace();
       setData(nextData);
-      return nextData;
+      return { payload, nextData };
     },
     [loadWorkspace],
+  );
+
+  const mutate = useCallback(
+    async (path, body, method = "POST") => {
+      const { nextData } = await mutateAndReturn(path, body, method);
+      return nextData;
+    },
+    [mutateAndReturn],
   );
 
   const loadTestInventory = useCallback(async (filters = {}) => {
@@ -394,6 +405,22 @@ export function useComplianceWorkspace(enabled = true) {
       ),
     createTaskFromEmployee: (employeeId, payload) =>
       mutate(`/compliance/tasks/from/employee/${employeeId}`, payload),
+    syncAutomationBacklog: () =>
+      mutateAndReturn("/compliance/automation/sync-backlog", null),
+    startNextAutomationTask: () =>
+      mutateAndReturn("/compliance/automation/tasks/start-next", null),
+    assignTaskToAutomation: (taskId) =>
+      mutateAndReturn(`/compliance/automation/tasks/${taskId}/assign`, null),
+    startAutomationTask: (taskId) =>
+      mutateAndReturn(`/compliance/automation/tasks/${taskId}/start`, null),
+    blockAutomationTask: (taskId, payload) =>
+      mutateAndReturn(`/compliance/automation/tasks/${taskId}/block`, payload),
+    markAutomationTaskReadyForReview: (taskId, payload) =>
+      mutateAndReturn(`/compliance/automation/tasks/${taskId}/ready-for-review`, payload),
+    returnAutomationTaskToBacklog: (taskId, payload) =>
+      mutateAndReturn(`/compliance/automation/tasks/${taskId}/return-to-backlog`, payload),
+    updateAutomationTaskMetadata: (taskId, payload) =>
+      mutateAndReturn(`/compliance/automation/tasks/${taskId}/metadata`, payload, "PATCH"),
     createRisk: (payload) => mutate("/compliance/risks", payload),
     updateRisk: (riskId, payload) =>
       mutate(`/compliance/risks/${riskId}`, payload, "PUT"),

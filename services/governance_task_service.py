@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import inspect, or_
 from sqlalchemy.orm import Session
 
+from database.models.compliance_record import ComplianceRecord
 from database.models.employee import Employee
 from database.models.governance_task import GovernanceTask
 from database.models.governance_task_activity import GovernanceTaskActivity
@@ -15,8 +16,12 @@ from database.models.security_event import SecurityEvent
 from database.models.vendor import Vendor
 from services.audit_service import record_audit_event
 
-OPEN_TASK_STATUSES = {"todo", "in_progress", "blocked"}
+_UNSET = object()
+
+OPEN_TASK_STATUSES = {"todo", "in_progress", "blocked", "ready_for_review"}
 CLOSED_TASK_STATUSES = {"done", "canceled"}
+TASK_STATUSES = OPEN_TASK_STATUSES | CLOSED_TASK_STATUSES
+TASK_PRIORITIES = {"low", "medium", "high", "critical"}
 PRIORITY_ORDER = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 
 SECURITY_EVENT_LABELS = {
@@ -38,8 +43,15 @@ SOURCE_URLS = {
     "security": "/dashboard",
     "audit_log": "/compliance/audit-log",
     "access_reviews": "/compliance/access-reviews",
+    "automation": "/compliance/tasks",
     "manual": "/compliance/tasks",
 }
+
+def _labelize(value: str | None) -> str | None:
+    if not value:
+        return None
+    return value.replace("_", " ").strip().title()
+
 
 def _coerce_dt(value: datetime | None) -> datetime | None:
     if value is None:
@@ -96,6 +108,42 @@ def _serialize_person(employee: Employee | None) -> dict[str, Any] | None:
         "role": employee.role,
         "status": employee.status,
     }
+
+
+def _serialize_actor_label(label: str | None, actor_type: str | None) -> dict[str, Any] | None:
+    if not label:
+        return None
+    return {
+        "id": None,
+        "name": label,
+        "email": None,
+        "role": None,
+        "status": None,
+        "type": actor_type,
+        "label": label,
+    }
+
+
+def _serialize_assignee(task: GovernanceTask, assignee: Employee | None) -> dict[str, Any] | None:
+    payload = _serialize_person(assignee)
+    if payload is not None:
+        payload["type"] = task.assignee_type or "employee"
+        payload["label"] = task.assignee_label or payload["name"]
+        return payload
+    return _serialize_actor_label(task.assignee_label, task.assignee_type)
+
+
+def _assignee_display_value(db: Session, company_id: int, employee_id: int | None, assignee_type: str | None, assignee_label: str | None) -> str:
+    if employee_id is not None:
+        employee = db.query(Employee).filter(Employee.company_id == company_id, Employee.id == employee_id).first()
+        if employee is not None:
+            return f"{employee.first_name} {employee.last_name}".strip() or employee.email
+        return f"Employee #{employee_id}"
+    if assignee_label:
+        return assignee_label
+    if assignee_type:
+        return _labelize(assignee_type) or assignee_type
+    return "Unassigned"
 
 
 def _employee_lookup(db: Session, company_id: int, employee_ids: set[int]) -> dict[int, Employee]:
@@ -158,6 +206,11 @@ def _task_source_summary(db: Session, task: GovernanceTask) -> dict[str, Any]:
         summary = _json_loads(task.metadata_json).get("event_type")
     elif task.source_type == "manual":
         label = "Manual task"
+    elif task.source_type in {"backlog_improvement", "automated_change", "system_improvement"}:
+        metadata = _json_loads(task.metadata_json)
+        backlog_id = task.source_id or metadata.get("backlog_item_id")
+        label = f"Backlog {backlog_id}" if backlog_id else "Automation backlog item"
+        summary = metadata.get("suggested_improvement") or metadata.get("operator_summary")
 
     return {
         "type": task.source_type,
@@ -169,7 +222,65 @@ def _task_source_summary(db: Session, task: GovernanceTask) -> dict[str, Any]:
     }
 
 
+def _serialize_incident_link(db: Session, task: GovernanceTask) -> dict[str, Any] | None:
+    if task.incident_id is None:
+        return None
+
+    result = (
+        db.query(GRCIncident, ComplianceRecord)
+        .join(ComplianceRecord, ComplianceRecord.id == GRCIncident.compliance_record_id)
+        .filter(
+            GRCIncident.id == task.incident_id,
+            ComplianceRecord.organization_id == task.company_id,
+        )
+        .first()
+    )
+    if result is None:
+        return {
+            "id": task.incident_id,
+            "title": f"Incident #{task.incident_id}",
+            "status": None,
+            "severity": None,
+            "description": None,
+            "url": SOURCE_URLS["incidents"],
+        }
+
+    incident, record = result
+    return {
+        "id": incident.id,
+        "record_id": record.id,
+        "title": record.title,
+        "status": record.status,
+        "severity": incident.severity,
+        "description": incident.description,
+        "url": SOURCE_URLS["incidents"],
+    }
+
+
+def _task_workflow_summary(task: GovernanceTask, metadata: dict[str, Any]) -> dict[str, Any]:
+    review_state = metadata.get("review_state")
+    if not review_state:
+        review_state = "pending_review" if task.status == "ready_for_review" else "none"
+
+    return {
+        "owner_type": str(
+            metadata.get("owner_type")
+            or task.assignee_type
+            or ("employee" if task.assignee_employee_id else "unassigned")
+        ).lower(),
+        "execution_mode": str(metadata.get("execution_mode") or "manual").lower(),
+        "review_state": str(review_state).lower(),
+        "automation_source": metadata.get("automation_source"),
+    }
+
+
 def serialize_task_activity(activity: GovernanceTaskActivity, actor: Employee | None = None) -> dict[str, Any]:
+    actor_payload = _serialize_person(actor)
+    if actor_payload is not None:
+        actor_payload["type"] = activity.actor_type or "employee"
+        actor_payload["label"] = activity.actor_label or actor_payload["name"]
+    elif activity.actor_label:
+        actor_payload = _serialize_actor_label(activity.actor_label, activity.actor_type)
     return {
         "id": activity.id,
         "action": activity.action,
@@ -177,7 +288,7 @@ def serialize_task_activity(activity: GovernanceTaskActivity, actor: Employee | 
         "to_value": activity.to_value,
         "details": activity.details,
         "created_at": activity.created_at.isoformat() if activity.created_at else None,
-        "actor": _serialize_person(actor),
+        "actor": actor_payload,
     }
 
 
@@ -192,7 +303,8 @@ def serialize_task(
 ) -> dict[str, Any]:
     metadata = _json_loads(task.metadata_json)
     due_date = task.due_date.isoformat() if task.due_date else None
-    is_overdue = bool(task.due_date and task.status in OPEN_TASK_STATUSES and task.due_date < _now())
+    source = _task_source_summary(db, task)
+    is_overdue = bool(task.due_date and task.status in OPEN_TASK_STATUSES and _coerce_dt(task.due_date) < _now())
     payload = {
         "id": task.id,
         "task_key": task_display_id(task.id),
@@ -204,17 +316,22 @@ def serialize_task(
         "source_type": task.source_type,
         "source_id": task.source_id,
         "source_module": task.source_module,
-        "source": _task_source_summary(db, task),
+        "source": source,
         "incident_id": task.incident_id,
+        "incident": _serialize_incident_link(db, task),
         "assignee_employee_id": task.assignee_employee_id,
+        "assignee_type": task.assignee_type,
+        "assignee_label": task.assignee_label,
         "reporter_employee_id": task.reporter_employee_id,
-        "assignee": _serialize_person(assignee),
+        "assignee": _serialize_assignee(task, assignee),
         "reporter": _serialize_person(reporter),
         "due_date": due_date,
         "created_at": task.created_at.isoformat() if task.created_at else None,
         "updated_at": task.updated_at.isoformat() if task.updated_at else None,
         "resolved_at": task.resolved_at.isoformat() if task.resolved_at else None,
         "metadata": metadata,
+        "workflow": _task_workflow_summary(task, metadata),
+        "summary": metadata.get("operator_summary") or metadata.get("summary") or task.description or source.get("summary"),
         "is_overdue": is_overdue,
         "is_open": task.status in OPEN_TASK_STATUSES,
     }
@@ -233,6 +350,8 @@ def add_task_activity(
     task_id: int,
     company_id: int,
     actor_employee_id: int | None,
+    actor_type: str | None = None,
+    actor_label: str | None = None,
     action: str,
     from_value: str | None = None,
     to_value: str | None = None,
@@ -244,6 +363,8 @@ def add_task_activity(
         task_id=task_id,
         company_id=company_id,
         actor_employee_id=actor_employee_id,
+        actor_type=actor_type,
+        actor_label=actor_label,
         action=action,
         from_value=from_value,
         to_value=to_value,
@@ -376,7 +497,7 @@ def summarize_tasks(db: Session, *, company_id: int, my_employee_id: int | None 
     now = _now()
     return {
         "open": sum(1 for task in tasks if task.status in OPEN_TASK_STATUSES),
-        "overdue": sum(1 for task in tasks if task.status in OPEN_TASK_STATUSES and task.due_date and task.due_date < now),
+        "overdue": sum(1 for task in tasks if task.status in OPEN_TASK_STATUSES and task.due_date and _coerce_dt(task.due_date) < now),
         "critical": sum(1 for task in tasks if task.status in OPEN_TASK_STATUSES and _priority_rank(task.priority) >= _priority_rank("critical")),
         "mine": sum(1 for task in tasks if my_employee_id is not None and task.assignee_employee_id == my_employee_id and task.status in OPEN_TASK_STATUSES),
         "security": sum(1 for task in tasks if task.source_module == "security" and task.status in OPEN_TASK_STATUSES),
@@ -426,10 +547,14 @@ def create_task(
     source_module: str = "manual",
     incident_id: int | None = None,
     assignee_employee_id: int | None = None,
+    assignee_type: str | None = None,
+    assignee_label: str | None = None,
     reporter_employee_id: int | None = None,
     due_date: datetime | None = None,
     metadata: dict[str, Any] | None = None,
     actor_user_id: int | None = None,
+    activity_actor_type: str | None = None,
+    activity_actor_label: str | None = None,
 ) -> GovernanceTask | None:
     if not _task_tables_available(db):
         return None
@@ -445,6 +570,8 @@ def create_task(
         source_module=source_module,
         incident_id=incident_id,
         assignee_employee_id=assignee_employee_id,
+        assignee_type=assignee_type or ("employee" if assignee_employee_id is not None else None),
+        assignee_label=None if assignee_employee_id is not None else assignee_label,
         reporter_employee_id=reporter_employee_id,
         due_date=_coerce_dt(due_date),
         metadata_json=_json_dumps(metadata),
@@ -457,6 +584,8 @@ def create_task(
         task_id=task.id,
         company_id=company_id,
         actor_employee_id=reporter_employee_id,
+        actor_type=activity_actor_type,
+        actor_label=activity_actor_label,
         action="created",
         to_value=status,
         details=description,
@@ -479,17 +608,21 @@ def update_task(
     task_id: int,
     actor_employee_id: int | None,
     actor_user_id: int | None,
-    title: str | None = None,
-    description: str | None = None,
-    status: str | None = None,
-    priority: str | None = None,
-    assignee_employee_id: int | None = None,
-    due_date: datetime | None = None,
-    incident_id: int | None = None,
-    source_type: str | None = None,
-    source_id: str | None = None,
-    source_module: str | None = None,
-    metadata: dict[str, Any] | None = None,
+    title: str | None | object = _UNSET,
+    description: str | None | object = _UNSET,
+    status: str | None | object = _UNSET,
+    priority: str | None | object = _UNSET,
+    assignee_employee_id: int | None | object = _UNSET,
+    assignee_type: str | None | object = _UNSET,
+    assignee_label: str | None | object = _UNSET,
+    due_date: datetime | None | object = _UNSET,
+    incident_id: int | None | object = _UNSET,
+    source_type: str | None | object = _UNSET,
+    source_id: str | None | object = _UNSET,
+    source_module: str | None | object = _UNSET,
+    metadata: dict[str, Any] | None | object = _UNSET,
+    activity_actor_type: str | None = None,
+    activity_actor_label: str | None = None,
 ) -> dict[str, Any] | None:
     if not _task_tables_available(db):
         return None
@@ -498,13 +631,33 @@ def update_task(
     if task is None:
         return None
 
-    if title is not None and title != task.title:
-        add_task_activity(db, task_id=task.id, company_id=company_id, actor_employee_id=actor_employee_id, action="title_changed", from_value=task.title, to_value=title)
+    if title is not _UNSET and title is not None and title != task.title:
+        add_task_activity(
+            db,
+            task_id=task.id,
+            company_id=company_id,
+            actor_employee_id=actor_employee_id,
+            actor_type=activity_actor_type,
+            actor_label=activity_actor_label,
+            action="title_changed",
+            from_value=task.title,
+            to_value=title,
+        )
         task.title = title
-    if description is not None and description != task.description:
-        add_task_activity(db, task_id=task.id, company_id=company_id, actor_employee_id=actor_employee_id, action="description_changed")
+
+    if description is not _UNSET and description != task.description:
+        add_task_activity(
+            db,
+            task_id=task.id,
+            company_id=company_id,
+            actor_employee_id=actor_employee_id,
+            actor_type=activity_actor_type,
+            actor_label=activity_actor_label,
+            action="description_changed",
+        )
         task.description = description
-    if status is not None and status != task.status:
+
+    if status is not _UNSET and status is not None and status != task.status:
         previous_status = task.status
         task.status = status
         if status in CLOSED_TASK_STATUSES:
@@ -516,65 +669,140 @@ def update_task(
             task_id=task.id,
             company_id=company_id,
             actor_employee_id=actor_employee_id,
+            actor_type=activity_actor_type,
+            actor_label=activity_actor_label,
             action="status_changed",
             from_value=previous_status,
             to_value=status,
         )
-    if priority is not None and priority != task.priority:
+
+    if priority is not _UNSET and priority is not None and priority != task.priority:
         add_task_activity(
             db,
             task_id=task.id,
             company_id=company_id,
             actor_employee_id=actor_employee_id,
+            actor_type=activity_actor_type,
+            actor_label=activity_actor_label,
             action="priority_changed",
             from_value=task.priority,
             to_value=priority,
         )
         task.priority = priority
-    if assignee_employee_id != task.assignee_employee_id:
-        add_task_activity(
+
+    assignee_changed = any(
+        value is not _UNSET
+        for value in (assignee_employee_id, assignee_type, assignee_label)
+    )
+    if assignee_changed:
+        next_assignee_employee_id = task.assignee_employee_id if assignee_employee_id is _UNSET else assignee_employee_id
+        next_assignee_type = task.assignee_type if assignee_type is _UNSET else assignee_type
+        next_assignee_label = task.assignee_label if assignee_label is _UNSET else assignee_label
+
+        if assignee_employee_id is not _UNSET:
+            if assignee_employee_id is not None:
+                if assignee_type is _UNSET:
+                    next_assignee_type = "employee"
+                if assignee_label is _UNSET:
+                    next_assignee_label = None
+            elif assignee_type is _UNSET and assignee_label is _UNSET:
+                next_assignee_type = None
+                next_assignee_label = None
+
+        previous_assignee_display = _assignee_display_value(
             db,
-            task_id=task.id,
-            company_id=company_id,
-            actor_employee_id=actor_employee_id,
-            action="assignee_changed",
-            from_value=str(task.assignee_employee_id) if task.assignee_employee_id is not None else None,
-            to_value=str(assignee_employee_id) if assignee_employee_id is not None else None,
+            company_id,
+            task.assignee_employee_id,
+            task.assignee_type,
+            task.assignee_label,
         )
-        task.assignee_employee_id = assignee_employee_id
-    if due_date is not None:
-        coerced_due_date = _coerce_dt(due_date)
+        next_assignee_display = _assignee_display_value(
+            db,
+            company_id,
+            next_assignee_employee_id,
+            next_assignee_type,
+            next_assignee_label,
+        )
+        if (
+            next_assignee_employee_id != task.assignee_employee_id
+            or next_assignee_type != task.assignee_type
+            or next_assignee_label != task.assignee_label
+        ):
+            add_task_activity(
+                db,
+                task_id=task.id,
+                company_id=company_id,
+                actor_employee_id=actor_employee_id,
+                actor_type=activity_actor_type,
+                actor_label=activity_actor_label,
+                action="assignee_changed",
+                from_value=previous_assignee_display,
+                to_value=next_assignee_display,
+                details=f"{previous_assignee_display} -> {next_assignee_display}",
+            )
+            task.assignee_employee_id = next_assignee_employee_id
+            task.assignee_type = next_assignee_type
+            task.assignee_label = next_assignee_label
+
+    if due_date is not _UNSET:
+        coerced_due_date = _coerce_dt(due_date) if due_date is not None else None
         if coerced_due_date != task.due_date:
             add_task_activity(
                 db,
                 task_id=task.id,
                 company_id=company_id,
                 actor_employee_id=actor_employee_id,
+                actor_type=activity_actor_type,
+                actor_label=activity_actor_label,
                 action="due_date_changed",
                 from_value=task.due_date.isoformat() if task.due_date else None,
                 to_value=coerced_due_date.isoformat() if coerced_due_date else None,
             )
             task.due_date = coerced_due_date
-    if incident_id is not None and incident_id != task.incident_id:
+
+    if incident_id is not _UNSET and incident_id != task.incident_id:
         add_task_activity(
             db,
             task_id=task.id,
             company_id=company_id,
             actor_employee_id=actor_employee_id,
+            actor_type=activity_actor_type,
+            actor_label=activity_actor_label,
             action="incident_linked",
-            to_value=str(incident_id),
+            from_value=str(task.incident_id) if task.incident_id is not None else None,
+            to_value=str(incident_id) if incident_id is not None else None,
         )
         task.incident_id = incident_id
-    if source_type is not None:
+
+    previous_source_snapshot = f"{task.source_type}:{task.source_id or ''}:{task.source_module}"
+    source_changed = False
+    if source_type is not _UNSET and source_type is not None and source_type != task.source_type:
         task.source_type = source_type
-    if source_id is not None:
+        source_changed = True
+    if source_id is not _UNSET and source_id is not None and source_id != task.source_id:
         task.source_id = source_id
-    if source_module is not None:
+        source_changed = True
+    if source_module is not _UNSET and source_module is not None and source_module != task.source_module:
         task.source_module = source_module
-    if metadata is not None:
+        source_changed = True
+    if source_changed:
+        add_task_activity(
+            db,
+            task_id=task.id,
+            company_id=company_id,
+            actor_employee_id=actor_employee_id,
+            actor_type=activity_actor_type,
+            actor_label=activity_actor_label,
+            action="source_linked",
+            from_value=previous_source_snapshot,
+            to_value=f"{task.source_type}:{task.source_id or ''}:{task.source_module}",
+        )
+
+    if metadata is not _UNSET and metadata is not None:
         existing_metadata = _json_loads(task.metadata_json)
         merged = {**existing_metadata, **metadata}
         task.metadata_json = _json_dumps(merged)
+
     db.add(task)
     _record_task_audit(
         db,

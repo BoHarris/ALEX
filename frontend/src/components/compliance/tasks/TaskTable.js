@@ -1,17 +1,18 @@
 import RecordTable from "../RecordTable";
-import { formatDateTime } from "../../../pages/compliance/utils";
+import { formatDateTime, formatStatusLabel } from "../../../pages/compliance/utils";
 import TaskPriorityBadge from "./TaskPriorityBadge";
 import TaskStatusBadge from "./TaskStatusBadge";
 
-export default function TaskTable({ tasks, onSelectTask }) {
+export default function TaskTable({ tasks, onSelectTask, selectedTaskId = null }) {
   const columns = [
     {
       key: "title",
       label: "Task",
       render: (task) => (
-        <div>
+        <div className="space-y-1">
           <p className="font-semibold text-app">{task.title}</p>
           <p className="mt-1 text-xs text-app-muted">{task.task_key}</p>
+          {task.source?.summary ? <p className="line-clamp-2 text-xs text-app-secondary">{task.source.summary}</p> : null}
         </div>
       ),
     },
@@ -31,5 +32,13 @@ export default function TaskTable({ tasks, onSelectTask }) {
     { key: "updated_at", label: "Updated", render: (task) => formatDateTime(task.updated_at) },
   ];
 
-  return <RecordTable columns={columns} rows={tasks} onRowClick={onSelectTask} />;
+  return (
+    <RecordTable
+      columns={columns}
+      rows={tasks}
+      onRowClick={onSelectTask}
+      selectedRowKey={selectedTaskId}
+      getRowAriaLabel={(task) => `Open ${task.task_key}: ${task.title}. Status ${formatStatusLabel(task.status)}.`}
+    />
+  );
 }

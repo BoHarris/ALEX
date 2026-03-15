@@ -29,14 +29,16 @@ export default function CreateTaskModal({ open, onClose, onSubmit, employees = [
     setSaving(true);
     setError(null);
     try {
+      const trimmedTitle = form.title.trim();
+      const trimmedDescription = form.description.trim();
       await onSubmit?.({
-        title: form.title,
-        description: form.description || null,
+        title: trimmedTitle,
+        description: trimmedDescription || null,
         priority: form.priority,
         source_module: form.source_module,
         source_type: form.source_module === "manual" ? "manual" : form.source_module,
         assignee_employee_id: form.assignee_employee_id ? Number(form.assignee_employee_id) : null,
-        due_date: form.due_date || null,
+        due_date: form.due_date ? new Date(form.due_date).toISOString() : null,
       });
       onClose?.();
     } catch (err) {
@@ -55,6 +57,7 @@ export default function CreateTaskModal({ open, onClose, onSubmit, employees = [
             required
             value={form.title}
             onChange={(event) => setForm((current) => ({ ...current, title: event.target.value }))}
+            placeholder="Task title"
             className="mt-2 w-full rounded-xl border border-app bg-app px-3 py-2 text-app"
           />
         </label>

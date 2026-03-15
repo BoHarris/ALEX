@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Button } from "../../components/button";
 import SummaryMetricCard from "../../components/compliance/SummaryMetricCard";
 import WorkspaceEmptyState from "../../components/compliance/WorkspaceEmptyState";
+import AutomationQueuePanel from "../../components/compliance/tasks/AutomationQueuePanel";
 import CreateTaskModal from "../../components/compliance/tasks/CreateTaskModal";
 import TaskDetailDrawer from "../../components/compliance/tasks/TaskDetailDrawer";
 import TaskFilters from "../../components/compliance/tasks/TaskFilters";
@@ -24,12 +25,18 @@ export default function ComplianceTasksPage() {
   const navigate = useNavigate();
   const workspace = useCompliancePageContext();
   const tasks = workspace.data?.tasks?.tasks || [];
+  const incidents = workspace.data?.incidents?.incidents || [];
+  const automation = workspace.data?.automation || null;
   const summary = workspace.data?.taskSummary?.summary || workspace.data?.overview?.task_summary || {};
   const employees = workspace.data?.directory?.employees || [];
   const currentEmployeeId = workspace.data?.me?.employee?.id || null;
   const [filters, setFilters] = useState(initialFilters);
   const [createOpen, setCreateOpen] = useState(false);
   const [pageError, setPageError] = useState(null);
+  const [selectedTaskId, setSelectedTaskId] = useState(null);
+  const [taskDetailLoading, setTaskDetailLoading] = useState(false);
+  const [taskSaving, setTaskSaving] = useState(false);
+  const [automationBusy, setAutomationBusy] = useState(false);
 
   const filteredTasks = useMemo(() => {
     return tasks.filter((task) => {
@@ -49,30 +56,64 @@ export default function ComplianceTasksPage() {
   }, [currentEmployeeId, filters, tasks]);
 
   async function openTask(task) {
+    setSelectedTaskId(task.id);
+    setTaskDetailLoading(true);
+    setPageError(null);
+    workspace.clearTaskDetail?.();
     try {
-      setPageError(null);
       await workspace.loadTaskDetail(task.id);
     } catch (err) {
+      setSelectedTaskId(null);
       setPageError(err.message);
+    } finally {
+      setTaskDetailLoading(false);
     }
   }
 
+  function closeTask() {
+    setSelectedTaskId(null);
+    setTaskDetailLoading(false);
+    workspace.clearTaskDetail?.();
+  }
+
   async function handleTaskChange(payload) {
-    if (!workspace.selectedTaskDetail) {
+    if (!selectedTaskId) {
       return;
     }
     try {
       setPageError(null);
-      await workspace.updateTask(workspace.selectedTaskDetail.id, payload);
-      await workspace.loadTaskDetail(workspace.selectedTaskDetail.id);
+      setTaskSaving(true);
+      await workspace.updateTask(selectedTaskId, payload);
+      await workspace.loadTaskDetail(selectedTaskId);
     } catch (err) {
       setPageError(err.message);
+    } finally {
+      setTaskSaving(false);
+    }
+  }
+
+  async function runAutomationMutation(mutateFn, resolveTaskId = (result) => result?.payload?.task?.id ?? selectedTaskId) {
+    try {
+      setPageError(null);
+      setAutomationBusy(true);
+      const result = await mutateFn();
+      const nextTaskId = resolveTaskId(result);
+      if (nextTaskId) {
+        setSelectedTaskId(nextTaskId);
+        await workspace.loadTaskDetail(nextTaskId);
+      }
+      return result;
+    } catch (err) {
+      setPageError(err.message);
+      return null;
+    } finally {
+      setAutomationBusy(false);
     }
   }
 
   async function handleCreateTask(payload) {
     setPageError(null);
-    await workspace.createTask(payload);
+    return workspace.createTask(payload);
   }
 
   function handleViewSource() {
@@ -80,8 +121,19 @@ export default function ComplianceTasksPage() {
     if (!task?.source?.url) {
       return;
     }
-    navigate(task.source.url);
+    navigate(task.source.url, { state: { sourceId: task.source?.id } });
   }
+
+  function handleViewIncident() {
+    const task = workspace.selectedTaskDetail;
+    if (!task?.incident_id) {
+      return;
+    }
+    navigate(task.incident?.url || "/compliance/incidents", { state: { incidentId: task.incident_id } });
+  }
+
+  const drawerOpen = selectedTaskId != null;
+  const activeAutomationTaskId = automation?.active_task?.id || null;
 
   return (
     <div className="space-y-6">
@@ -94,46 +146,71 @@ export default function ComplianceTasksPage() {
         <SummaryMetricCard label="From Testing" value={summary.testing ?? 0} />
       </section>
 
+      <AutomationQueuePanel
+        automation={automation}
+        loading={workspace.loading}
+        busy={automationBusy || taskSaving}
+        onSyncBacklog={() => runAutomationMutation(() => workspace.syncAutomationBacklog(), () => selectedTaskId)}
+        onStartNext={() => runAutomationMutation(() => workspace.startNextAutomationTask(), (result) => result?.payload?.task?.id || null)}
+        onOpenTask={openTask}
+      />
+
       <section className="surface-card rounded-3xl p-6">
         <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
           <div>
             <h2 className="text-2xl font-semibold text-app">Tasks</h2>
-            <p className="mt-2 text-sm text-app-secondary">A unified governance work queue across incidents, vendors, employees, testing, and security alerts.</p>
+            <p className="mt-2 text-sm text-app-secondary">A unified governance work queue across incidents, vendors, employees, testing, security alerts, and governed automation changes.</p>
           </div>
-          <div className="flex gap-2">
-            <Button label="Create Task" onClick={() => setCreateOpen(true)} />
-            <Button label="Create from Test Failure" onClick={() => workspace.createTaskFromSource("test-failure")} />
-            <Button label="Create from Vendor" onClick={() => workspace.createTaskFromSource("vendor")} />
+          <div className="flex flex-wrap gap-2">
+            <Button onClick={() => setCreateOpen(true)}>Create Task</Button>
+            <Button onClick={() => navigate("/compliance/testing")}>Review Testing</Button>
+            <Button onClick={() => navigate("/compliance/vendors")}>Review Vendors</Button>
           </div>
         </div>
 
-        <TaskFilters filters={filters} onChange={setFilters} />
-        <TaskTable tasks={filteredTasks} onRowClick={openTask} />
+        <TaskFilters filters={filters} setFilters={setFilters} assignees={employees} />
+
+        <div className="mt-6">
+          {filteredTasks.length ? (
+            <TaskTable tasks={filteredTasks} onSelectTask={openTask} selectedTaskId={selectedTaskId} />
+          ) : (
+            <WorkspaceEmptyState
+              title="No tasks match"
+              description="Create a manual task or adjust filters to surface governance work across the workspace."
+              action={<Button onClick={() => setCreateOpen(true)}>Create Task</Button>}
+            />
+          )}
+        </div>
       </section>
 
       <CreateTaskModal
         open={createOpen}
         onClose={() => setCreateOpen(false)}
         onSubmit={handleCreateTask}
+        employees={employees}
       />
 
       <TaskDetailDrawer
+        open={drawerOpen}
+        loading={taskDetailLoading}
+        saving={taskSaving || automationBusy}
         task={workspace.selectedTaskDetail}
+        employees={employees}
+        incidents={incidents}
+        activeAutomationTaskId={activeAutomationTaskId}
+        onClose={closeTask}
         onChange={handleTaskChange}
         onViewSource={handleViewSource}
+        onViewIncident={handleViewIncident}
+        onAssignAutomation={() => runAutomationMutation(() => workspace.assignTaskToAutomation(selectedTaskId))}
+        onStartAutomation={() => runAutomationMutation(() => workspace.startAutomationTask(selectedTaskId))}
+        onBlockAutomation={(payload) => runAutomationMutation(() => workspace.blockAutomationTask(selectedTaskId, payload || { reason: "Blocked during automation work." }))}
+        onMarkAutomationReady={(payload) => runAutomationMutation(() => workspace.markAutomationTaskReadyForReview(selectedTaskId, payload))}
+        onReturnAutomationToBacklog={(payload) => runAutomationMutation(() => workspace.returnAutomationTaskToBacklog(selectedTaskId, payload))}
+        onSaveAutomationMetadata={(payload) => runAutomationMutation(() => workspace.updateAutomationTaskMetadata(selectedTaskId, payload))}
       />
 
       {pageError ? <div className="surface-card rounded-3xl border border-rose-400/30 bg-rose-500/10 p-4 text-sm text-rose-300">{pageError}</div> : null}
-
-      {filteredTasks.length ? (
-        <TaskTable tasks={filteredTasks} onSelectTask={openTask} />
-      ) : (
-        <WorkspaceEmptyState
-          title="No tasks match"
-          description="Create a manual task or adjust filters to surface governance work across the workspace."
-          action={<Button onClick={() => setCreateOpen(true)}>Create Task</Button>}
-        />
-      )}
     </div>
   );
 }
