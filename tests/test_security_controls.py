@@ -11,6 +11,7 @@ from database.models.audit_event import AuditEvent
 from database.models.audit_log import AuditLog
 from database.models.company import Company
 from database.models.company_settings import CompanySettings
+from database.models.scan_job import ScanJob
 from database.models.scan_results import ScanResult
 from database.models.security_state import SecurityState
 from database.models.security_incident import SecurityIncident
@@ -36,6 +37,7 @@ def _session():
             CompanySettings.__table__,
             SecurityState.__table__,
             ScanResult.__table__,
+            ScanJob.__table__,
             SecurityIncident.__table__,
         ],
     )

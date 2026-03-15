@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi.params import Query as FastAPIQueryParam
 from pydantic import BaseModel, Field, ValidationInfo, field_validator
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -49,7 +51,6 @@ from services.test_metrics_service import (
     compute_test_metrics,
     create_tracked_test_run,
     list_test_results as query_test_results,
-    list_test_runs as query_test_runs,
     record_test_result,
 )
 from services.test_management_service import (
@@ -58,11 +59,43 @@ from services.test_management_service import (
     get_test_management_dashboard,
     list_managed_tests,
 )
+from services.governance_task_service import (
+    create_employee_followup_task,
+    create_incident_remediation_task,
+    create_task,
+    create_vendor_review_task,
+    get_task_detail,
+    list_source_tasks,
+    list_tasks,
+    summarize_tasks,
+    update_task as update_governance_task,
+)
 from services.test_failure_task_service import ensure_failure_task_for_test, get_failure_task_for_test, update_failure_task
 from services.test_discovery_service import build_test_node_id, normalize_test_file_path, split_test_node_id
+from services.test_execution_service import (
+    ACTIVE_RUN_STATUSES,
+    DuplicateTestRunError,
+    UnsupportedTestExecutionError,
+    parse_test_run_metadata,
+    queue_test_execution,
+    start_category_run,
+    start_full_suite_run,
+    start_single_test_run,
+)
 from utils.api_errors import error_payload
+from services.task_generation_service import TaskGenerationService
+
+# Initialize TaskGenerationService
+task_generation_service = TaskGenerationService(db_session=Depends(get_db))
 
 router = APIRouter(prefix="/compliance", tags=["Compliance Workspace"])
+
+
+def _demo_workspace_seeding_enabled() -> bool:
+    configured = (os.getenv("ENABLE_DEMO_WORKSPACE_SEEDING") or "").strip().lower()
+    if configured:
+        return configured == "true"
+    return os.getenv("ENV", "development").strip().lower() != "production"
 
 
 def _parse_json_list(value: str | None) -> list[str]:
@@ -177,13 +210,31 @@ def _safe_json(value: str | None):
         return value
 
 
-def _serialize_test_run(run: ComplianceTestRun) -> dict:
-    return {
+def _normalize_optional_query_value(value):
+    return None if isinstance(value, FastAPIQueryParam) else value
+
+
+def _serialize_test_run(run: ComplianceTestRun, triggered_by: Employee | None = None, *, include_logs: bool = False) -> dict:
+    started_at = run.started_at.isoformat() if run.started_at else None
+    completed_at = run.completed_at.isoformat() if run.completed_at else None
+    created_at = run.run_at.isoformat() if run.run_at else None
+    payload = {
         "id": run.id,
         "suite_name": run.suite_name,
         "category": run.category,
         "dataset_name": run.dataset_name,
         "status": run.status,
+        "run_type": run.run_type,
+        "trigger_source": run.trigger_source,
+        "execution_engine": run.execution_engine,
+        "pytest_node_id": run.pytest_node_id,
+        "triggered_by_user_id": run.triggered_by_user_id,
+        "triggered_by_employee_id": run.triggered_by_employee_id,
+        "triggered_by": {
+            "id": triggered_by.id,
+            "name": f"{triggered_by.first_name} {triggered_by.last_name}".strip() or triggered_by.email,
+            "email": triggered_by.email,
+        } if triggered_by is not None else None,
         "total_tests": run.total_tests,
         "passed_tests": run.passed_tests,
         "failed_tests": run.failed_tests,
@@ -191,8 +242,25 @@ def _serialize_test_run(run: ComplianceTestRun) -> dict:
         "accuracy_score": float(run.accuracy_score) if run.accuracy_score is not None else None,
         "coverage_percent": float(run.coverage_percent) if run.coverage_percent is not None else None,
         "report_link": run.report_link,
-        "run_at": run.run_at.isoformat() if run.run_at else None,
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "run_at": created_at,
+        "created_at": created_at,
+        "return_code": run.return_code,
+        "failure_summary": run.failure_summary,
+        "metadata": parse_test_run_metadata(run.metadata_json),
+        "is_active": run.status in ACTIVE_RUN_STATUSES,
     }
+    if started_at and completed_at:
+        started = datetime.fromisoformat(started_at)
+        completed = datetime.fromisoformat(completed_at)
+        payload["duration_ms"] = max(0, round((completed - started).total_seconds() * 1000))
+    else:
+        payload["duration_ms"] = None
+    if include_logs:
+        payload["stdout"] = run.stdout
+        payload["stderr"] = run.stderr
+    return payload
 
 
 def _serialize_test_case(case: ComplianceTestCaseResult, run: ComplianceTestRun | None = None) -> dict:
@@ -218,6 +286,41 @@ def _serialize_test_case(case: ComplianceTestCaseResult, run: ComplianceTestRun 
         payload["category"] = run.category
         payload["suite_name"] = run.suite_name
     return payload
+
+
+def _test_run_or_404(db: Session, run_id: int, organization_id: int) -> ComplianceTestRun:
+    run = (
+        db.query(ComplianceTestRun)
+        .filter(
+            ComplianceTestRun.id == run_id,
+            ComplianceTestRun.organization_id == organization_id,
+        )
+        .first()
+    )
+    if run is None:
+        raise HTTPException(status_code=404, detail=error_payload(detail="Test run not found", error_code="not_found"))
+    return run
+
+
+def _serialize_test_run_result(db: Session, *, organization_id: int, case: ComplianceTestCaseResult, run: ComplianceTestRun) -> dict:
+    payload = _serialize_test_case(case, run)
+    payload["linked_tasks"] = list_source_tasks(
+        db,
+        company_id=organization_id,
+        source_type="test_failure",
+        source_id=payload["test_node_id"],
+    )
+    return payload
+
+
+def _queue_test_run(background_tasks: BackgroundTasks | None, db: Session, run: ComplianceTestRun) -> ComplianceTestRun:
+    queue_test_execution(
+        run.id,
+        background_tasks=background_tasks,
+        execute_inline=background_tasks is None,
+    )
+    db.refresh(run)
+    return run
 
 
 def _serialize_audit_log(event: AuditLog, employee_lookup: dict[int, Employee]) -> dict:
@@ -519,10 +622,62 @@ class CodeReviewDecisionRequest(BaseModel):
     reviewer_comments: str | None = None
 
 
+class TaskCreateRequest(BaseModel):
+    title: str
+    description: str | None = None
+    status: str = "todo"
+    priority: str = "medium"
+    source_type: str = "manual"
+    source_id: str | None = None
+    source_module: str = "manual"
+    incident_id: int | None = None
+    assignee_employee_id: int | None = None
+    due_date: datetime | None = None
+    metadata: dict = Field(default_factory=dict)
+
+
+class TaskUpdateRequest(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    status: str | None = None
+    priority: str | None = None
+    assignee_employee_id: int | None = None
+    due_date: datetime | None = None
+    incident_id: int | None = None
+    metadata: dict | None = None
+
+
+class TaskAssignRequest(BaseModel):
+    assignee_employee_id: int | None = None
+
+
+class TaskStatusRequest(BaseModel):
+    status: str
+
+
+class TaskLinkIncidentRequest(BaseModel):
+    incident_id: int
+
+
+class TaskLinkSourceRequest(BaseModel):
+    source_type: str
+    source_id: str
+    source_module: str
+
+
+class SourceTaskCreateRequest(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    priority: str | None = None
+    assignee_employee_id: int | None = None
+    due_date: datetime | None = None
+
+
 @router.get("/me")
 def get_current_employee(current_employee: dict = Depends(require_employee_context), db: Session = Depends(get_db)):
-    ensure_default_company_and_employee(db)
-    ensure_test_runs(db, current_employee["organization_id"])
+    if _demo_workspace_seeding_enabled():
+        ensure_default_company_and_employee(db)
+        ensure_test_runs(db, current_employee["organization_id"])
     employees = db.query(Employee).filter(Employee.company_id == current_employee["organization_id"]).order_by(Employee.first_name.asc()).all()
     company = db.query(Company).filter(Company.id == current_employee["organization_id"]).first()
     return {
@@ -536,6 +691,7 @@ def get_current_employee(current_employee: dict = Depends(require_employee_conte
 @router.get("/dashboard")
 def get_compliance_dashboard(current_employee: dict = Depends(require_compliance_workspace_access), db: Session = Depends(get_db)):
     organization_id = current_employee["organization_id"]
+    task_summary = summarize_tasks(db, company_id=organization_id, my_employee_id=current_employee["employee_id"])
     policy_count = db.query(func.count(WikiPage.id)).join(ComplianceRecord, ComplianceRecord.id == WikiPage.compliance_record_id).filter(ComplianceRecord.organization_id == organization_id).scalar() or 0
     vendor_total = db.query(func.count(Vendor.id)).join(ComplianceRecord, ComplianceRecord.id == Vendor.compliance_record_id).filter(ComplianceRecord.organization_id == organization_id).scalar() or 0
     open_incidents = db.query(func.count(GRCIncident.id)).join(ComplianceRecord, ComplianceRecord.id == GRCIncident.compliance_record_id).filter(ComplianceRecord.organization_id == organization_id, ComplianceRecord.status != "closed").scalar() or 0
@@ -558,6 +714,9 @@ def get_compliance_dashboard(current_employee: dict = Depends(require_compliance
             "pending_code_reviews": pending_code_reviews,
             "approved_code_reviews": approved_code_reviews,
             "blocked_code_reviews": blocked_code_reviews,
+            "open_tasks": task_summary["open"],
+            "overdue_tasks": task_summary["overdue"],
+            "critical_tasks": task_summary["critical"],
         },
         "test_coverage_status": [
             {
@@ -654,6 +813,8 @@ def get_compliance_overview(current_employee: dict = Depends(require_compliance_
         .limit(6)
         .all()
     )
+    recent_tasks = list_tasks(db, company_id=organization_id, only_open=True)[:6]
+    task_summary = summarize_tasks(db, company_id=organization_id, my_employee_id=current_employee["employee_id"])
     employee_lookup = {
         employee.user_id: employee
         for employee in db.query(Employee).filter(Employee.company_id == organization_id).all()
@@ -666,6 +827,8 @@ def get_compliance_overview(current_employee: dict = Depends(require_compliance_
         },
         "summary": dashboard["summary"],
         "testing_summary": dashboard["test_coverage_status"],
+        "task_summary": task_summary,
+        "recent_tasks": recent_tasks,
         "recent_activity": [
             {
                 "id": record.id,
@@ -807,6 +970,369 @@ def list_compliance_audit_log(
     return {"events": serialized}
 
 
+@router.get("/tasks/summary")
+def get_governance_task_summary(current_employee: dict = Depends(require_compliance_workspace_access), db: Session = Depends(get_db)):
+    return {
+        "summary": summarize_tasks(
+            db,
+            company_id=current_employee["organization_id"],
+            my_employee_id=current_employee["employee_id"],
+        )
+    }
+
+
+@router.get("/tasks")
+def list_governance_tasks(
+    status: str | None = Query(default=None),
+    priority: str | None = Query(default=None),
+    source_module: str | None = Query(default=None),
+    assignee_employee_id: int | None = Query(default=None),
+    open_only: bool | None = Query(default=None),
+    due_before: datetime | None = Query(default=None),
+    search: str | None = Query(default=None),
+    my_tasks: bool = Query(default=False),
+    current_employee: dict = Depends(require_compliance_workspace_access),
+    db: Session = Depends(get_db),
+):
+    if not isinstance(status, str):
+        status = None
+    if not isinstance(priority, str):
+        priority = None
+    if not isinstance(source_module, str):
+        source_module = None
+    if not isinstance(assignee_employee_id, int):
+        assignee_employee_id = None
+    if not isinstance(open_only, bool):
+        open_only = None
+    if not isinstance(due_before, datetime):
+        due_before = None
+    if not isinstance(search, str):
+        search = None
+    if not isinstance(my_tasks, bool):
+        my_tasks = False
+    tasks = list_tasks(
+        db,
+        company_id=current_employee["organization_id"],
+        status=status,
+        priority=priority,
+        source_module=source_module,
+        assignee_employee_id=assignee_employee_id,
+        only_open=open_only,
+        due_before=due_before,
+        search=search,
+        mine_employee_id=current_employee["employee_id"] if my_tasks else None,
+    )
+    return {"tasks": tasks}
+
+
+@router.post("/tasks")
+def create_governance_task(
+    payload: TaskCreateRequest,
+    current_employee: dict = Depends(require_security_or_compliance_admin),
+    db: Session = Depends(get_db),
+):
+    task = create_task(
+        db,
+        company_id=current_employee["organization_id"],
+        title=payload.title,
+        description=payload.description,
+        status=payload.status,
+        priority=payload.priority,
+        source_type=payload.source_type,
+        source_id=payload.source_id,
+        source_module=payload.source_module,
+        incident_id=payload.incident_id,
+        assignee_employee_id=payload.assignee_employee_id,
+        reporter_employee_id=current_employee["employee_id"],
+        due_date=payload.due_date,
+        metadata=payload.metadata,
+        actor_user_id=current_employee["user_id"],
+    )
+    db.commit()
+    detail = get_task_detail(db, company_id=current_employee["organization_id"], task_id=task.id) if task is not None else None
+    if detail is None:
+        raise HTTPException(status_code=503, detail=error_payload(detail="Task workflow is unavailable", error_code="service_unavailable"))
+    return {"task": detail}
+
+
+@router.get("/tasks/{task_id}")
+def get_governance_task(task_id: int, current_employee: dict = Depends(require_compliance_workspace_access), db: Session = Depends(get_db)):
+    detail = get_task_detail(db, company_id=current_employee["organization_id"], task_id=task_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail=error_payload(detail="Task not found", error_code="not_found"))
+    return {"task": detail}
+
+
+@router.patch("/tasks/{task_id}")
+def patch_governance_task(
+    task_id: int,
+    payload: TaskUpdateRequest,
+    current_employee: dict = Depends(require_security_or_compliance_admin),
+    db: Session = Depends(get_db),
+):
+    detail = update_governance_task(
+        db,
+        company_id=current_employee["organization_id"],
+        task_id=task_id,
+        actor_employee_id=current_employee["employee_id"],
+        actor_user_id=current_employee["user_id"],
+        title=payload.title,
+        description=payload.description,
+        status=payload.status,
+        priority=payload.priority,
+        assignee_employee_id=payload.assignee_employee_id,
+        due_date=payload.due_date,
+        incident_id=payload.incident_id,
+        metadata=payload.metadata,
+    )
+    if detail is None:
+        raise HTTPException(status_code=404, detail=error_payload(detail="Task not found", error_code="not_found"))
+    db.commit()
+    return {"task": detail}
+
+
+@router.post("/tasks/{task_id}/assign")
+def assign_governance_task(
+    task_id: int,
+    payload: TaskAssignRequest,
+    current_employee: dict = Depends(require_security_or_compliance_admin),
+    db: Session = Depends(get_db),
+):
+    detail = update_governance_task(
+        db,
+        company_id=current_employee["organization_id"],
+        task_id=task_id,
+        actor_employee_id=current_employee["employee_id"],
+        actor_user_id=current_employee["user_id"],
+        assignee_employee_id=payload.assignee_employee_id,
+    )
+    if detail is None:
+        raise HTTPException(status_code=404, detail=error_payload(detail="Task not found", error_code="not_found"))
+    db.commit()
+    return {"task": detail}
+
+
+@router.post("/tasks/{task_id}/status")
+def update_governance_task_status(
+    task_id: int,
+    payload: TaskStatusRequest,
+    current_employee: dict = Depends(require_security_or_compliance_admin),
+    db: Session = Depends(get_db),
+):
+    detail = update_governance_task(
+        db,
+        company_id=current_employee["organization_id"],
+        task_id=task_id,
+        actor_employee_id=current_employee["employee_id"],
+        actor_user_id=current_employee["user_id"],
+        status=payload.status,
+    )
+    if detail is None:
+        raise HTTPException(status_code=404, detail=error_payload(detail="Task not found", error_code="not_found"))
+    db.commit()
+    return {"task": detail}
+
+
+@router.post("/tasks/{task_id}/link-incident")
+def link_governance_task_to_incident(
+    task_id: int,
+    payload: TaskLinkIncidentRequest,
+    current_employee: dict = Depends(require_security_or_compliance_admin),
+    db: Session = Depends(get_db),
+):
+    incident, _record = _incident_or_404(db, payload.incident_id, current_employee["organization_id"])
+    detail = update_governance_task(
+        db,
+        company_id=current_employee["organization_id"],
+        task_id=task_id,
+        actor_employee_id=current_employee["employee_id"],
+        actor_user_id=current_employee["user_id"],
+        incident_id=incident.id,
+    )
+    if detail is None:
+        raise HTTPException(status_code=404, detail=error_payload(detail="Task not found", error_code="not_found"))
+    db.commit()
+    return {"task": detail}
+
+
+@router.post("/tasks/{task_id}/link-source")
+def link_governance_task_to_source(
+    task_id: int,
+    payload: TaskLinkSourceRequest,
+    current_employee: dict = Depends(require_security_or_compliance_admin),
+    db: Session = Depends(get_db),
+):
+    detail = update_governance_task(
+        db,
+        company_id=current_employee["organization_id"],
+        task_id=task_id,
+        actor_employee_id=current_employee["employee_id"],
+        actor_user_id=current_employee["user_id"],
+        source_type=payload.source_type,
+        source_id=payload.source_id,
+        source_module=payload.source_module,
+    )
+    if detail is None:
+        raise HTTPException(status_code=404, detail=error_payload(detail="Task not found", error_code="not_found"))
+    db.commit()
+    return {"task": detail}
+
+
+@router.post("/tasks/from/incident/{incident_id}")
+def create_task_from_incident(
+    incident_id: int,
+    payload: SourceTaskCreateRequest,
+    current_employee: dict = Depends(require_security_or_compliance_admin),
+    db: Session = Depends(get_db),
+):
+    incident, record = _incident_or_404(db, incident_id, current_employee["organization_id"])
+    task = create_incident_remediation_task(
+        db,
+        company_id=current_employee["organization_id"],
+        incident=incident,
+        incident_title=payload.title or record.title,
+        incident_status=record.status,
+        actor_employee_id=current_employee["employee_id"],
+        actor_user_id=current_employee["user_id"],
+    )
+    if task is None:
+        raise HTTPException(status_code=503, detail=error_payload(detail="Task workflow is unavailable", error_code="service_unavailable"))
+    if any(value is not None for value in (payload.description, payload.priority, payload.assignee_employee_id, payload.due_date, payload.title)):
+        update_governance_task(
+            db,
+            company_id=current_employee["organization_id"],
+            task_id=task.id,
+            actor_employee_id=current_employee["employee_id"],
+            actor_user_id=current_employee["user_id"],
+            title=payload.title or task.title,
+            description=payload.description or incident.description,
+            priority=payload.priority or task.priority,
+            assignee_employee_id=payload.assignee_employee_id,
+            due_date=payload.due_date,
+        )
+    db.commit()
+    return {"task": get_task_detail(db, company_id=current_employee["organization_id"], task_id=task.id)}
+
+
+@router.post("/tasks/from/vendor/{vendor_id}")
+def create_task_from_vendor(
+    vendor_id: int,
+    payload: SourceTaskCreateRequest,
+    current_employee: dict = Depends(require_security_or_compliance_admin),
+    db: Session = Depends(get_db),
+):
+    vendor, record = _vendor_or_404(db, vendor_id, current_employee["organization_id"])
+    task = create_vendor_review_task(
+        db,
+        company_id=current_employee["organization_id"],
+        vendor=vendor,
+        title=payload.title or f"Start vendor review: {vendor.vendor_name}",
+        description=payload.description or "Review vendor evidence, contract posture, and current risk signals.",
+        actor_employee_id=current_employee["employee_id"],
+        actor_user_id=current_employee["user_id"],
+        due_date=payload.due_date or vendor.contract_end_date or record.review_date,
+    )
+    if task is None:
+        raise HTTPException(status_code=503, detail=error_payload(detail="Task workflow is unavailable", error_code="service_unavailable"))
+    if payload.priority or payload.assignee_employee_id:
+        update_governance_task(
+            db,
+            company_id=current_employee["organization_id"],
+            task_id=task.id,
+            actor_employee_id=current_employee["employee_id"],
+            actor_user_id=current_employee["user_id"],
+            priority=payload.priority or task.priority,
+            assignee_employee_id=payload.assignee_employee_id,
+        )
+    db.commit()
+    return {"task": get_task_detail(db, company_id=current_employee["organization_id"], task_id=task.id)}
+
+
+@router.post("/tasks/from/test-failure")
+def create_task_from_test_failure_query(
+    test_id: str = Query(...),
+    payload: SourceTaskCreateRequest | None = None,
+    current_employee: dict = Depends(require_security_or_compliance_admin),
+    db: Session = Depends(get_db),
+):
+    effective_payload = payload or SourceTaskCreateRequest()
+    return create_task_from_test_failure(test_id, effective_payload, current_employee=current_employee, db=db)
+
+
+@router.post("/tasks/from/test-failure/{test_id:path}")
+def create_task_from_test_failure(
+    test_id: str,
+    payload: SourceTaskCreateRequest,
+    current_employee: dict = Depends(require_security_or_compliance_admin),
+    db: Session = Depends(get_db),
+):
+    detail = get_test_case_detail(test_id, current_employee=current_employee, db=db)
+    if detail.get("status") != "failed":
+        raise HTTPException(status_code=409, detail=error_payload(detail="Task can only be created for failing tests", error_code="conflict"))
+    if detail.get("task") is None:
+        ensure_failure_task_for_test(
+            db,
+            organization_id=current_employee["organization_id"],
+            test_node_id=detail["test_node_id"],
+        )
+    tasks = list_source_tasks(db, company_id=current_employee["organization_id"], source_type="test_failure", source_id=detail["test_node_id"])
+    if not tasks:
+        raise HTTPException(status_code=503, detail=error_payload(detail="Task workflow is unavailable", error_code="service_unavailable"))
+    task_id = tasks[0]["id"]
+    if any(value is not None for value in (payload.title, payload.description, payload.priority, payload.assignee_employee_id, payload.due_date)):
+        update_governance_task(
+            db,
+            company_id=current_employee["organization_id"],
+            task_id=task_id,
+            actor_employee_id=current_employee["employee_id"],
+            actor_user_id=current_employee["user_id"],
+            title=payload.title or tasks[0]["title"],
+            description=payload.description or tasks[0]["description"],
+            priority=payload.priority or tasks[0]["priority"],
+            assignee_employee_id=payload.assignee_employee_id,
+            due_date=payload.due_date,
+        )
+    db.commit()
+    return {"task": get_task_detail(db, company_id=current_employee["organization_id"], task_id=task_id)}
+
+
+@router.post("/tasks/from/employee/{employee_id}")
+def create_task_from_employee(
+    employee_id: int,
+    payload: SourceTaskCreateRequest,
+    current_employee: dict = Depends(require_security_or_compliance_admin),
+    db: Session = Depends(get_db),
+):
+    employee = db.query(Employee).filter(Employee.id == employee_id, Employee.company_id == current_employee["organization_id"]).first()
+    if employee is None:
+        raise HTTPException(status_code=404, detail=error_payload(detail="Employee not found", error_code="not_found"))
+    task = create_employee_followup_task(
+        db,
+        company_id=current_employee["organization_id"],
+        employee_id=employee.id,
+        employee_name=f"{employee.first_name} {employee.last_name}".strip(),
+        title=payload.title or f"Employee governance follow-up: {employee.first_name} {employee.last_name}",
+        description=payload.description or "Review employee access, profile completeness, and open governance follow-up.",
+        actor_employee_id=current_employee["employee_id"],
+        actor_user_id=current_employee["user_id"],
+        priority=payload.priority or "medium",
+    )
+    if task is None:
+        raise HTTPException(status_code=503, detail=error_payload(detail="Task workflow is unavailable", error_code="service_unavailable"))
+    if payload.assignee_employee_id or payload.due_date:
+        update_governance_task(
+            db,
+            company_id=current_employee["organization_id"],
+            task_id=task.id,
+            actor_employee_id=current_employee["employee_id"],
+            actor_user_id=current_employee["user_id"],
+            assignee_employee_id=payload.assignee_employee_id,
+            due_date=payload.due_date,
+        )
+    db.commit()
+    return {"task": get_task_detail(db, company_id=current_employee["organization_id"], task_id=task.id)}
+
+
 @router.get("/directory")
 def list_employee_directory(current_employee: dict = Depends(require_compliance_workspace_access), db: Session = Depends(get_db)):
     employees = db.query(Employee).filter(Employee.company_id == current_employee["organization_id"]).order_by(Employee.first_name.asc(), Employee.last_name.asc()).all()
@@ -834,6 +1360,18 @@ def create_employee(payload: EmployeeCreateRequest, current_employee: dict = Dep
     db.add(employee)
     db.commit()
     db.refresh(employee)
+    if not employee.department or not employee.job_title:
+        create_employee_followup_task(
+            db,
+            company_id=current_employee["organization_id"],
+            employee_id=employee.id,
+            employee_name=f"{employee.first_name} {employee.last_name}".strip(),
+            title=f"Complete employee governance profile: {employee.first_name} {employee.last_name}",
+            description="Employee profile is missing required governance metadata. Add department and job title details.",
+            actor_employee_id=current_employee["employee_id"],
+            actor_user_id=current_employee["user_id"],
+            priority="medium",
+        )
     log_compliance_audit(db, company_id=current_employee["organization_id"], user_id=current_employee["user_id"], employee_id=current_employee["employee_id"], action="employee_created", module="employee_directory", resource_type="employee", resource_id=str(employee.id), metadata={"role": employee.role})
     db.commit()
     return {"employee": serialize_employee(employee)}
@@ -862,6 +1400,30 @@ def update_employee(employee_id: int, payload: EmployeeUpdateRequest, current_em
     if payload.email is not None:
         employee.email = payload.email
     db.add(employee)
+    if employee.status in {"inactive", "suspended"}:
+        create_employee_followup_task(
+            db,
+            company_id=current_employee["organization_id"],
+            employee_id=employee.id,
+            employee_name=f"{employee.first_name} {employee.last_name}".strip(),
+            title=f"Review access for inactive employee: {employee.first_name} {employee.last_name}",
+            description="Employee status changed away from active. Review access, assignments, and related governance records.",
+            actor_employee_id=current_employee["employee_id"],
+            actor_user_id=current_employee["user_id"],
+            priority="high",
+        )
+    elif not employee.department or not employee.job_title:
+        create_employee_followup_task(
+            db,
+            company_id=current_employee["organization_id"],
+            employee_id=employee.id,
+            employee_name=f"{employee.first_name} {employee.last_name}".strip(),
+            title=f"Complete employee governance profile: {employee.first_name} {employee.last_name}",
+            description="Employee profile is missing required governance metadata. Add department and job title details.",
+            actor_employee_id=current_employee["employee_id"],
+            actor_user_id=current_employee["user_id"],
+            priority="medium",
+        )
     log_compliance_audit(db, company_id=current_employee["organization_id"], user_id=current_employee["user_id"], employee_id=current_employee["employee_id"], action="employee_updated", module="employee_directory", resource_type="employee", resource_id=str(employee.id), metadata={"status": employee.status, "role": employee.role})
     db.commit()
     return {"employee": serialize_employee(employee)}
@@ -874,6 +1436,17 @@ def deactivate_employee(employee_id: int, current_employee: dict = Depends(requi
         raise HTTPException(status_code=404, detail=error_payload(detail="Employee not found", error_code="not_found"))
     employee.status = "inactive"
     db.add(employee)
+    create_employee_followup_task(
+        db,
+        company_id=current_employee["organization_id"],
+        employee_id=employee.id,
+        employee_name=f"{employee.first_name} {employee.last_name}".strip(),
+        title=f"Access audit for inactive employee: {employee.first_name} {employee.last_name}",
+        description="Employee was deactivated. Review current access, assigned training, and remediation follow-up.",
+        actor_employee_id=current_employee["employee_id"],
+        actor_user_id=current_employee["user_id"],
+        priority="high",
+    )
     log_compliance_audit(db, company_id=current_employee["organization_id"], user_id=current_employee["user_id"], employee_id=current_employee["employee_id"], action="employee_deactivated", module="employee_directory", resource_type="employee", resource_id=str(employee.id))
     db.commit()
     return {"employee": serialize_employee(employee)}
@@ -1028,12 +1601,24 @@ def create_vendor(payload: VendorCreateRequest, current_employee: dict = Depends
         document_links=json.dumps(payload.document_links),
     )
     db.add(vendor)
+    db.flush()
     for link in payload.document_links:
         add_attachment(db, record_id=record.id, employee_id=current_employee["employee_id"], label="vendor-link", path_or_url=link)
+    if vendor.security_review_status != "approved" or (vendor.risk_rating or "").lower() == "high":
+        create_vendor_review_task(
+            db,
+            company_id=current_employee["organization_id"],
+            vendor=vendor,
+            title=f"Begin vendor review: {vendor.vendor_name}",
+            description="Vendor was added or updated and needs a governance review. Collect evidence, review the contract, and confirm risk posture.",
+            actor_employee_id=current_employee["employee_id"],
+            actor_user_id=current_employee["user_id"],
+            due_date=payload.review_date or payload.contract_end_date,
+        )
     log_compliance_audit(db, company_id=current_employee["organization_id"], user_id=current_employee["user_id"], employee_id=current_employee["employee_id"], action="vendor_created", module="vendor", resource_type="vendor", resource_id=str(record.id), metadata={"risk_rating": payload.risk_rating})
+    response_payload = {"record": serialize_compliance_record(record), "vendor_id": vendor.id}
     db.commit()
-    db.refresh(vendor)
-    return {"record": serialize_compliance_record(record), "vendor_id": vendor.id}
+    return response_payload
 
 
 @router.get("/vendors")
@@ -1055,6 +1640,7 @@ def list_vendors(current_employee: dict = Depends(require_compliance_workspace_a
                     "last_review_date": vendor.last_review_date.isoformat() if vendor.last_review_date else None,
                     "document_links": _parse_json_list(vendor.document_links),
                 },
+                "linked_tasks": list_source_tasks(db, company_id=current_employee["organization_id"], source_type="vendor_review", source_id=str(vendor.id)),
             }
             for vendor, record in results
         ]
@@ -1079,6 +1665,17 @@ def update_vendor(vendor_id: int, payload: VendorUpdateRequest, current_employee
     record.updated_by_employee_id = current_employee["employee_id"]
     db.add(vendor)
     db.add(record)
+    if vendor.security_review_status in {"pending", "needs follow-up"} or (vendor.risk_rating or "").lower() == "high":
+        create_vendor_review_task(
+            db,
+            company_id=current_employee["organization_id"],
+            vendor=vendor,
+            title=f"Review vendor risk: {vendor.vendor_name}",
+            description="Vendor review requires follow-up based on current risk, review status, or contract timing.",
+            actor_employee_id=current_employee["employee_id"],
+            actor_user_id=current_employee["user_id"],
+            due_date=payload.last_review_date or record.review_date or vendor.contract_end_date,
+        )
     log_compliance_audit(db, company_id=current_employee["organization_id"], user_id=current_employee["user_id"], employee_id=current_employee["employee_id"], action="vendor_updated", module="vendor", resource_type="vendor", resource_id=str(vendor.id), metadata={"risk_rating": vendor.risk_rating, "security_review_status": vendor.security_review_status})
     db.commit()
     return {"vendor_id": vendor.id, "record": serialize_compliance_record(record)}
@@ -1086,7 +1683,8 @@ def update_vendor(vendor_id: int, payload: VendorUpdateRequest, current_employee
 
 @router.get("/tests/dashboard")
 def get_test_dashboard(current_employee: dict = Depends(require_compliance_workspace_access), db: Session = Depends(get_db)):
-    ensure_test_runs(db, current_employee["organization_id"])
+    if _demo_workspace_seeding_enabled():
+        ensure_test_runs(db, current_employee["organization_id"])
     return get_test_management_dashboard(db, organization_id=current_employee["organization_id"])
 
 
@@ -1139,6 +1737,15 @@ def get_test_category_detail(category_name: str, current_employee: dict = Depend
     }
 
 
+@router.get("/tests/case-detail")
+def get_test_case_detail_query(
+    test_id: str = Query(...),
+    current_employee: dict = Depends(require_compliance_workspace_access),
+    db: Session = Depends(get_db),
+):
+    return get_test_case_detail(test_id, current_employee=current_employee, db=db)
+
+
 @router.get("/tests/cases/{test_id}")
 def get_test_case_detail(test_id: str, current_employee: dict = Depends(require_compliance_workspace_access), db: Session = Depends(get_db)):
     test_id_value = str(test_id)
@@ -1166,6 +1773,7 @@ def get_test_case_detail(test_id: str, current_employee: dict = Depends(require_
             organization_id=current_employee["organization_id"],
             test_node_id=payload["test_node_id"],
         )
+        payload["linked_tasks"] = list_source_tasks(db, company_id=current_employee["organization_id"], source_type="test_failure", source_id=payload["test_node_id"])
         if payload.get("status") == "failed":
             db.commit()
         return payload
@@ -1190,7 +1798,17 @@ def get_test_case_detail(test_id: str, current_employee: dict = Depends(require_
             test_node_id=detail["test_node_id"],
         )
         db.commit()
+    detail["linked_tasks"] = list_source_tasks(db, company_id=current_employee["organization_id"], source_type="test_failure", source_id=detail["test_node_id"])
     return detail
+
+
+@router.get("/tests/case-history")
+def get_test_case_history_query(
+    test_id: str = Query(...),
+    current_employee: dict = Depends(require_compliance_workspace_access),
+    db: Session = Depends(get_db),
+):
+    return get_test_case_history(test_id, current_employee=current_employee, db=db)
 
 
 @router.get("/tests/cases/{test_id}/history")
@@ -1222,6 +1840,84 @@ def get_test_case_history(test_id: str, current_employee: dict = Depends(require
     return {"history": history}
 
 
+@router.post("/tests/run-all")
+def run_full_test_suite(
+    background_tasks: BackgroundTasks,
+    current_employee: dict = Depends(require_security_or_compliance_admin),
+    db: Session = Depends(get_db),
+):
+    try:
+        run = start_full_suite_run(
+            db,
+            organization_id=current_employee["organization_id"],
+            triggered_by_user_id=current_employee["user_id"],
+            triggered_by_employee_id=current_employee["employee_id"],
+        )
+    except DuplicateTestRunError as exc:
+        raise HTTPException(status_code=409, detail=error_payload(detail=str(exc), error_code="conflict"))
+    run = _queue_test_run(background_tasks, db, run)
+    triggered_by = db.query(Employee).filter(Employee.id == run.triggered_by_employee_id).first() if run.triggered_by_employee_id else None
+    return {"run": _serialize_test_run(run, triggered_by)}
+
+
+@router.post("/tests/run-test")
+def run_single_test_query(
+    test_id: str = Query(...),
+    background_tasks: BackgroundTasks = None,
+    current_employee: dict = Depends(require_security_or_compliance_admin),
+    db: Session = Depends(get_db),
+):
+    return run_single_test(test_id, background_tasks=background_tasks, current_employee=current_employee, db=db)
+
+
+@router.post("/tests/run-test/{test_id:path}")
+def run_single_test(
+    test_id: str,
+    background_tasks: BackgroundTasks,
+    current_employee: dict = Depends(require_security_or_compliance_admin),
+    db: Session = Depends(get_db),
+):
+    try:
+        run = start_single_test_run(
+            db,
+            organization_id=current_employee["organization_id"],
+            triggered_by_user_id=current_employee["user_id"],
+            triggered_by_employee_id=current_employee["employee_id"],
+            test_id=test_id,
+        )
+    except UnsupportedTestExecutionError as exc:
+        raise HTTPException(status_code=409, detail=error_payload(detail=str(exc), error_code="conflict"))
+    except DuplicateTestRunError as exc:
+        raise HTTPException(status_code=409, detail=error_payload(detail=str(exc), error_code="conflict"))
+    run = _queue_test_run(background_tasks, db, run)
+    triggered_by = db.query(Employee).filter(Employee.id == run.triggered_by_employee_id).first() if run.triggered_by_employee_id else None
+    return {"run": _serialize_test_run(run, triggered_by)}
+
+
+@router.post("/tests/categories/{category_name}/run")
+def run_test_category(
+    category_name: str,
+    background_tasks: BackgroundTasks,
+    current_employee: dict = Depends(require_security_or_compliance_admin),
+    db: Session = Depends(get_db),
+):
+    try:
+        run = start_category_run(
+            db,
+            organization_id=current_employee["organization_id"],
+            triggered_by_user_id=current_employee["user_id"],
+            triggered_by_employee_id=current_employee["employee_id"],
+            category_name=category_name,
+        )
+    except UnsupportedTestExecutionError as exc:
+        raise HTTPException(status_code=409, detail=error_payload(detail=str(exc), error_code="conflict"))
+    except DuplicateTestRunError as exc:
+        raise HTTPException(status_code=409, detail=error_payload(detail=str(exc), error_code="conflict"))
+    run = _queue_test_run(background_tasks, db, run)
+    triggered_by = db.query(Employee).filter(Employee.id == run.triggered_by_employee_id).first() if run.triggered_by_employee_id else None
+    return {"run": _serialize_test_run(run, triggered_by)}
+
+
 @router.post("/tests/runs")
 def create_test_run(payload: TestRunCreateRequest, current_employee: dict = Depends(require_security_or_compliance_admin), db: Session = Depends(get_db)):
     run = create_tracked_test_run(
@@ -1233,6 +1929,8 @@ def create_test_run(payload: TestRunCreateRequest, current_employee: dict = Depe
         dataset_name=payload.dataset_name,
         coverage_percent=payload.coverage_percent,
         report_link=payload.report_link,
+        triggered_by_user_id=current_employee["user_id"],
+        triggered_by_employee_id=current_employee["employee_id"],
     )
     db.commit()
     return _serialize_test_run(run)
@@ -1257,6 +1955,7 @@ def create_test_result(
         db,
         test_run_id=run.id,
         test_name=derived_test_name,
+        test_node_id=payload.test_node_id,
         dataset_name=payload.dataset_name or run.dataset_name,
         expected_result=payload.expected_result,
         actual_result=payload.actual_result,
@@ -1270,8 +1969,18 @@ def create_test_result(
         created_by_employee_id=current_employee["employee_id"],
         created_by_user_id=current_employee["user_id"],
     )
+    response_payload = _serialize_test_case(result, run)
     db.commit()
-    return _serialize_test_case(result, run)
+    return response_payload
+
+
+@router.get("/tests/case-task")
+def get_test_case_task_query(
+    test_id: str = Query(...),
+    current_employee: dict = Depends(require_compliance_workspace_access),
+    db: Session = Depends(get_db),
+):
+    return get_test_case_task(test_id, current_employee=current_employee, db=db)
 
 
 @router.get("/tests/cases/{test_id}/task")
@@ -1297,6 +2006,17 @@ def get_test_case_task(test_id: str, current_employee: dict = Depends(require_co
 
     task = get_failure_task_for_test(db, organization_id=current_employee["organization_id"], test_node_id=test_node_id)
     return {"task": task}
+
+
+@router.post("/tests/case-task")
+def create_or_update_test_case_task_query(
+    test_id: str = Query(...),
+    payload: TestFailureTaskCreateRequest | None = None,
+    current_employee: dict = Depends(require_security_or_compliance_admin),
+    db: Session = Depends(get_db),
+):
+    effective_payload = payload or TestFailureTaskCreateRequest()
+    return create_or_update_test_case_task(test_id, effective_payload, current_employee=current_employee, db=db)
 
 
 @router.post("/tests/cases/{test_id}/task")
@@ -1380,17 +2100,67 @@ def list_test_runs(
     limit: int = Query(default=25, ge=1, le=100),
     dataset_name: str | None = Query(default=None),
     suite_name: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    run_type: str | None = Query(default=None),
+    active_only: bool | None = Query(default=None),
     current_employee: dict = Depends(require_compliance_workspace_access),
     db: Session = Depends(get_db),
 ):
-    runs = query_test_runs(
-        db,
-        organization_id=current_employee["organization_id"],
-        limit=limit,
-        dataset_name=dataset_name,
-        suite_name=suite_name,
+    dataset_name = _normalize_optional_query_value(dataset_name)
+    suite_name = _normalize_optional_query_value(suite_name)
+    status = _normalize_optional_query_value(status)
+    run_type = _normalize_optional_query_value(run_type)
+    active_only = _normalize_optional_query_value(active_only)
+    query = db.query(ComplianceTestRun).filter(ComplianceTestRun.organization_id == current_employee["organization_id"])
+    if dataset_name:
+        query = query.filter(ComplianceTestRun.dataset_name == dataset_name)
+    if suite_name:
+        query = query.filter(ComplianceTestRun.suite_name == suite_name)
+    if status:
+        query = query.filter(ComplianceTestRun.status == status)
+    if run_type:
+        query = query.filter(ComplianceTestRun.run_type == run_type)
+    if active_only is True:
+        query = query.filter(ComplianceTestRun.status.in_(tuple(ACTIVE_RUN_STATUSES)))
+    elif active_only is False:
+        query = query.filter(~ComplianceTestRun.status.in_(tuple(ACTIVE_RUN_STATUSES)))
+    runs = query.order_by(ComplianceTestRun.run_at.desc(), ComplianceTestRun.id.desc()).limit(limit).all()
+    employee_ids = {run.triggered_by_employee_id for run in runs if run.triggered_by_employee_id is not None}
+    employees = {
+        employee.id: employee
+        for employee in db.query(Employee).filter(Employee.company_id == current_employee["organization_id"], Employee.id.in_(employee_ids)).all()
+    } if employee_ids else {}
+    return {"runs": [_serialize_test_run(run, employees.get(run.triggered_by_employee_id)) for run in runs]}
+
+
+@router.get("/tests/runs/{run_id}")
+def get_test_run_detail(run_id: int, current_employee: dict = Depends(require_compliance_workspace_access), db: Session = Depends(get_db)):
+    run = _test_run_or_404(db, run_id, current_employee["organization_id"])
+    triggered_by = db.query(Employee).filter(Employee.id == run.triggered_by_employee_id).first() if run.triggered_by_employee_id else None
+    results = (
+        db.query(ComplianceTestCaseResult)
+        .filter(ComplianceTestCaseResult.test_run_id == run.id)
+        .order_by(ComplianceTestCaseResult.last_run_at.desc(), ComplianceTestCaseResult.id.desc())
+        .all()
     )
-    return {"runs": [_serialize_test_run(run) for run in runs]}
+    serialized_results = [
+        _serialize_test_run_result(
+            db,
+            organization_id=current_employee["organization_id"],
+            case=result,
+            run=run,
+        )
+        for result in results
+    ]
+    linked_tasks: dict[int, dict] = {}
+    for item in serialized_results:
+        for task in item.get("linked_tasks", []):
+            linked_tasks[int(task["id"])] = task
+    return {
+        "run": _serialize_test_run(run, triggered_by, include_logs=True),
+        "results": serialized_results,
+        "linked_tasks": list(linked_tasks.values()),
+    }
 
 
 @router.get("/tests/metrics")
@@ -1549,10 +2319,20 @@ def create_incident(payload: IncidentCreateRequest, current_employee: dict = Dep
         assigned_to_employee_id=payload.assigned_to_employee_id,
     )
     db.add(incident)
+    db.flush()
+    create_incident_remediation_task(
+        db,
+        company_id=current_employee["organization_id"],
+        incident=incident,
+        incident_title=record.title,
+        incident_status=record.status,
+        actor_employee_id=current_employee["employee_id"],
+        actor_user_id=current_employee["user_id"],
+    )
     log_compliance_audit(db, company_id=current_employee["organization_id"], user_id=current_employee["user_id"], employee_id=current_employee["employee_id"], action="incident_created", module="incident", resource_type="grc_incident", resource_id=str(record.id), metadata={"severity": payload.severity})
+    incident_id = incident.id
     db.commit()
-    db.refresh(incident)
-    return {"incident_id": incident.id}
+    return {"incident_id": incident_id}
 
 
 @router.put("/incidents/{incident_id}")
@@ -1573,6 +2353,15 @@ def update_incident(incident_id: int, payload: IncidentUpdateRequest, current_em
         if payload.status == "closed":
             incident.closed_at = datetime.now(timezone.utc)
     db.add(incident)
+    create_incident_remediation_task(
+        db,
+        company_id=current_employee["organization_id"],
+        incident=incident,
+        incident_title=record.title,
+        incident_status=record.status,
+        actor_employee_id=current_employee["employee_id"],
+        actor_user_id=current_employee["user_id"],
+    )
     log_compliance_audit(db, company_id=current_employee["organization_id"], user_id=current_employee["user_id"], employee_id=current_employee["employee_id"], action="incident_updated", module="incident", resource_type="grc_incident", resource_id=str(incident.id), metadata={"status": record.status})
     db.commit()
     return {"incident_id": incident.id, "status": record.status}
@@ -1597,6 +2386,7 @@ def list_incidents(current_employee: dict = Depends(require_compliance_workspace
                     "root_cause": incident.root_cause,
                     "lessons_learned": incident.lessons_learned,
                 },
+                "linked_tasks": list_source_tasks(db, company_id=current_employee["organization_id"], source_type="incident", source_id=str(incident.id)),
             }
             for incident, record in results
         ]
@@ -1835,3 +2625,7 @@ def decide_code_review(review_id: int, payload: CodeReviewDecisionRequest, curre
     log_compliance_audit(db, company_id=current_employee["organization_id"], user_id=current_employee["user_id"], employee_id=current_employee["employee_id"], action="code_review_decision_recorded", module="code_review", resource_type="code_review", resource_id=str(review.id), metadata={"decision": payload.decision, "status": next_status})
     db.commit()
     return {"review_id": review.id, "decision": review.reviewer_decision, "status": record.status}
+
+
+
+

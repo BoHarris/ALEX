@@ -28,6 +28,9 @@ export default function ComplianceOverviewPage() {
         <SummaryMetricCard label="Policies" value={summary.policy_coverage ?? 0} />
         <SummaryMetricCard label="Vendors" value={summary.vendor_risk_status ?? 0} />
         <SummaryMetricCard label="Open Incidents" value={summary.open_incidents ?? 0} />
+        <SummaryMetricCard label="Open Tasks" value={summary.open_tasks ?? 0} />
+        <SummaryMetricCard label="Overdue Tasks" value={summary.overdue_tasks ?? 0} />
+        <SummaryMetricCard label="Critical Tasks" value={summary.critical_tasks ?? 0} />
         <SummaryMetricCard label="Pending Reviews" value={summary.access_review_status ?? 0} />
         <SummaryMetricCard label="Training %" value={summary.training_completion_rate ?? 0} />
         <SummaryMetricCard label="High Risks" value={summary.high_risk_items ?? 0} />
@@ -61,6 +64,18 @@ export default function ComplianceOverviewPage() {
                   <span className={statusTone(item.incident.severity)}>{item.incident.severity}</span> | {item.record.status}
                 </p>
                 <p className="mt-2 text-xs text-app-muted">Detected {formatDateTime(item.incident.detected_at)}</p>
+              </div>
+            )}
+          />
+          <SimpleList
+            title="Open Tasks"
+            items={overview.recent_tasks || []}
+            emptyText="No open governance tasks."
+            renderItem={(item) => (
+              <div key={item.id} className="rounded-2xl border border-app p-4">
+                <p className="font-semibold text-app">{item.task_key} | {item.title}</p>
+                <p className="mt-1 text-sm text-app-secondary">{item.source?.label || item.source_module} | <span className={statusTone(item.status)}>{item.status}</span></p>
+                <p className="mt-2 text-xs text-app-muted">{item.assignee?.name || "Unassigned"} | updated {formatDateTime(item.updated_at)}</p>
               </div>
             )}
           />
@@ -150,6 +165,7 @@ export default function ComplianceOverviewPage() {
             <Link className="rounded-2xl border border-app px-4 py-3 text-sm font-medium text-app-secondary hover:bg-white/5 hover:text-app" to="/compliance/policies">Create policy page</Link>
             <Link className="rounded-2xl border border-app px-4 py-3 text-sm font-medium text-app-secondary hover:bg-white/5 hover:text-app" to="/compliance/vendors">Add vendor</Link>
             <Link className="rounded-2xl border border-app px-4 py-3 text-sm font-medium text-app-secondary hover:bg-white/5 hover:text-app" to="/compliance/incidents">Log incident</Link>
+            <Link className="rounded-2xl border border-app px-4 py-3 text-sm font-medium text-app-secondary hover:bg-white/5 hover:text-app" to="/compliance/tasks">View tasks</Link>
             <Link className="rounded-2xl border border-app px-4 py-3 text-sm font-medium text-app-secondary hover:bg-white/5 hover:text-app" to="/compliance/risks">Add risk</Link>
             <Link className="rounded-2xl border border-app px-4 py-3 text-sm font-medium text-app-secondary hover:bg-white/5 hover:text-app" to="/compliance/access-reviews">Start access review</Link>
             <Link className="rounded-2xl border border-app px-4 py-3 text-sm font-medium text-app-secondary hover:bg-white/5 hover:text-app" to="/compliance/training">Assign training</Link>

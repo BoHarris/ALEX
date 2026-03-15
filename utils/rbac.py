@@ -4,12 +4,14 @@ from dataclasses import dataclass
 
 
 ROLE_USER = "user"
+ROLE_AUDITOR = "auditor"
 ROLE_ORG_ADMIN = "organization_admin"
 ROLE_SECURITY_ADMIN = "security_admin"
 
 ROLE_ALIASES = {
     "member": ROLE_USER,
     "user": ROLE_USER,
+    "auditor": ROLE_AUDITOR,
     "admin": ROLE_ORG_ADMIN,
     "org_admin": ROLE_ORG_ADMIN,
     "organization_admin": ROLE_ORG_ADMIN,
@@ -39,6 +41,14 @@ def get_role_permissions(role_value: str | None) -> RolePermissions:
             can_view_audit_logs=True,
             can_change_system_config=True,
             can_access_security_dashboard=True,
+        )
+    if role == ROLE_AUDITOR:
+        return RolePermissions(
+            can_access_admin=False,
+            can_manage_users=False,
+            can_view_audit_logs=True,
+            can_change_system_config=False,
+            can_access_security_dashboard=False,
         )
     if role == ROLE_ORG_ADMIN:
         return RolePermissions(

@@ -9,7 +9,7 @@ from database.models.user import User
 from services.compliance_service import serialize_employee
 from services.security_service import extract_request_security_context, register_token_issue
 from utils.api_errors import error_payload
-from utils.auth_utils import decode_token_with_error
+from utils.auth_utils import decode_token_with_error, ensure_user_is_active
 
 
 EMPLOYEE_ADMIN_ROLES = {"security_admin", "compliance_admin", "organization_admin"}
@@ -55,6 +55,16 @@ def require_employee_context(request: Request, db: Session = Depends(get_db)) ->
             status_code=403,
             detail=error_payload(detail="Employee access required", error_code="forbidden"),
         )
+    if not user.is_active:
+        register_token_issue(
+            db,
+            organization_id=employee.company_id,
+            user_id=user.id,
+            token_issue="inactive_user",
+            context=extract_request_security_context(request),
+        )
+        db.commit()
+        ensure_user_is_active(user)
     request.state.user_id = user.id
     request.state.employee_id = employee.id
     return {

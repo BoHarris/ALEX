@@ -22,10 +22,16 @@ REQUIRED_DIRS = (
     BASE_DIR / "logs",
 )
 REQUIRED_SCHEMA = {
-    "users": {"id", "email", "role", "company_id", "refresh_version"},
+    "users": {"id", "email", "role", "company_id", "refresh_version", "has_completed_onboarding"},
     "pending_registrations": {"id", "email", "webauthn_user_handle", "challenge", "expires_at"},
-    "refresh_sessions": {"id", "user_id", "refresh_jti_hash", "revoked", "created_at"},
-    "scan_results": {"id", "user_id", "company_id", "filename", "redacted_type_counts"},
+    "refresh_sessions": {"id", "user_id", "refresh_jti_hash", "revoked", "created_at", "device_info"},
+    "scan_results": {"id", "user_id", "company_id", "filename", "redacted_type_counts", "report_html_path", "report_pdf_path"},
+    "scan_jobs": {"id", "company_id", "user_id", "scan_result_id", "status", "created_at"},
+    "organization_memberships": {"id", "company_id", "user_id", "role", "status", "created_at"},
+    "api_keys": {"id", "company_id", "created_by_user_id", "hashed_key", "created_at", "usage_count"},
+    "security_events": {"id", "company_id", "user_id", "event_type", "severity", "created_at"},
+    "governance_tasks": {"id", "company_id", "title", "status", "priority", "source_type", "source_module", "created_at"},
+    "governance_task_activities": {"id", "task_id", "company_id", "action", "created_at"},
     "webauthn_challenges": {"id", "user_id", "challenge", "challenge_type", "expires_at"},
     "company_settings": {"id", "company_id", "default_policy_label", "allowed_upload_types"},
     "audit_events": {"id", "company_id", "user_id", "event_type", "event_category", "description", "event_metadata", "created_at"},
@@ -41,7 +47,29 @@ REQUIRED_SCHEMA = {
     "compliance_activities": {"id", "compliance_record_id", "action", "created_at"},
     "wiki_pages": {"id", "compliance_record_id", "slug", "category", "content_markdown"},
     "vendors": {"id", "compliance_record_id", "vendor_name", "service_category", "security_review_status"},
-    "compliance_test_runs": {"id", "organization_id", "category", "suite_name", "dataset_name", "status", "total_tests", "passed_tests", "failed_tests", "accuracy_score", "run_at"},
+    "compliance_test_runs": {
+        "id",
+        "organization_id",
+        "triggered_by_user_id",
+        "triggered_by_employee_id",
+        "run_type",
+        "trigger_source",
+        "pytest_node_id",
+        "category",
+        "suite_name",
+        "dataset_name",
+        "status",
+        "total_tests",
+        "passed_tests",
+        "failed_tests",
+        "accuracy_score",
+        "started_at",
+        "completed_at",
+        "return_code",
+        "failure_summary",
+        "metadata_json",
+        "run_at",
+    },
     "compliance_test_case_results": {"id", "test_run_id", "name", "dataset_name", "expected_result", "actual_result", "status", "confidence_score", "last_run_at"},
     "compliance_test_failure_tasks": {"id", "compliance_record_id", "organization_id", "test_node_id", "latest_failed_run_id", "latest_failed_result_id", "status", "priority", "created_at"},
     "access_reviews": {"id", "compliance_record_id", "reviewer_employee_id", "reviewed_employee_id", "decision"},
@@ -281,3 +309,5 @@ def run_startup_validations():
     _validate_pdf_support()
     logger.info("Startup validation completed successfully.")
     return model
+
+

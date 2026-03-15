@@ -11,8 +11,14 @@ from contextlib import asynccontextmanager
 
 from routers import protected, logout, refresh
 from routers.admin_router import router as admin_router
+from routers.api_keys import router as api_keys_router
 from routers.compliance_router import router as compliance_router
+from routers.onboarding import router as onboarding_router
+from routers.organizations import router as organizations_router
 from routers.privacy_metrics import router as privacy_metrics_router
+from routers.scan_jobs import router as scan_jobs_router
+from routers.security_events import router as security_events_router
+from routers.sessions import router as sessions_router
 from routers.webauthn_auth import router as webauthn_auth_router
 
 from routers.scans import router as scans_router
@@ -20,14 +26,15 @@ from routers.scans import router as scans_router
 from database.models.company import Company  # noqa: F401
 from database.models.user import User 
 
-from services.startup_validation import run_startup_validations
+import services.startup_validation as startup_validation
 from services.request_context import (
     ProductionHTTPSMiddleware,
     RequestContextMiddleware,
     SecurityHeadersMiddleware,
 )
 import database.models  # registers models
-from database.database import engine
+from database.database import SessionLocal, engine
+from utils.api_key_auth import ApiKeyAuthMiddleware
 from utils.api_errors import default_error_code_for_status, error_payload
 
 logger = logging.getLogger(__name__)
@@ -52,9 +59,41 @@ logging.basicConfig(
 )
 
 
+def _initialize_application_state(app: FastAPI):
+    startup_validation._validate_environment()
+    startup_validation._validate_database()
+    startup_validation._validate_schema_revision()
+    startup_validation._validate_schema_state()
+
+    configured_demo_seed = (os.getenv("ENABLE_DEMO_WORKSPACE_SEEDING") or "").strip().lower()
+    demo_workspace_seeding_enabled = (
+        configured_demo_seed == "true"
+        if configured_demo_seed
+        else os.getenv("ENV", "development").strip().lower() != "production"
+    )
+
+    if demo_workspace_seeding_enabled:
+        db = SessionLocal()
+        try:
+            startup_validation.ensure_default_company_and_employee(db)
+        finally:
+            db.close()
+        logger.warning("Demo workspace seeding is enabled for this runtime.")
+    else:
+        logger.info("Demo workspace seeding is disabled for this runtime.")
+
+    startup_validation._validate_directories()
+    startup_validation._validate_assets()
+    model = startup_validation._validate_model_loading()
+    startup_validation._validate_pdf_support()
+    logger.info("Startup validation completed successfully.")
+    app.state.pii_model = model
+    return model
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.pii_model = run_startup_validations()
+    _initialize_application_state(app)
     
     yield
     
@@ -66,6 +105,7 @@ app = FastAPI(
     description="Real-Time PII Detection and Redaction API",
     lifespan=lifespan
     )
+app.state.session_factory = SessionLocal
 
 cors_origins_env = (os.getenv("CORS_ORIGINS") or "").strip()
 if cors_origins_env:
@@ -83,6 +123,7 @@ app.add_middleware(
 app.add_middleware(ProductionHTTPSMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RequestContextMiddleware)
+app.add_middleware(ApiKeyAuthMiddleware)
 
 #auth (passkeys-only)
 app.include_router(webauthn_auth_router)
@@ -93,6 +134,12 @@ app.include_router(protected.companies_router)
 app.include_router(logout.router)
 app.include_router(refresh.router)
 app.include_router(scans_router)
+app.include_router(scan_jobs_router)
+app.include_router(sessions_router)
+app.include_router(api_keys_router)
+app.include_router(organizations_router)
+app.include_router(security_events_router)
+app.include_router(onboarding_router)
 app.include_router(privacy_metrics_router)
 app.include_router(admin_router)
 app.include_router(compliance_router)

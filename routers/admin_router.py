@@ -13,9 +13,11 @@ from database.models.audit_log import AuditLog
 from database.models.company import Company
 from database.models.company_settings import CompanySettings
 from database.models.scan_results import ScanResult
+from database.models.security_event import SecurityEvent
 from database.models.security_incident import SecurityIncident
 from dependencies.tier_guard import require_company_admin, require_security_admin
 from services.audit_service import list_audit_events as query_audit_events, record_audit_event, serialize_audit_event
+from services.governance_task_service import list_source_tasks
 from services.retention_service import apply_retention_state_bulk
 from services.security_service import extract_request_security_context
 from utils.api_errors import error_payload
@@ -374,9 +376,9 @@ def get_security_dashboard(
         .all()
     )
     recent_alerts = (
-        db.query(AuditLog)
-        .filter(AuditLog.organization_id == company_id, AuditLog.event_category == "security_alert")
-        .order_by(AuditLog.created_at.desc())
+        db.query(SecurityEvent)
+        .filter(SecurityEvent.company_id == company_id)
+        .order_by(SecurityEvent.created_at.desc())
         .limit(25)
         .all()
     )
@@ -423,9 +425,12 @@ def get_security_dashboard(
             {
                 "id": event.id,
                 "event_type": event.event_type,
+                "event_label": event.event_type.replace("_", " ").title(),
+                "description": event.description,
                 "metadata": event.event_metadata,
                 "ip_address": event.ip_address,
                 "created_at": event.created_at.isoformat() if event.created_at else None,
+                "linked_tasks": list_source_tasks(db, company_id=company_id, source_type="security_alert", source_id=str(event.id)),
             }
             for event in recent_alerts
         ],

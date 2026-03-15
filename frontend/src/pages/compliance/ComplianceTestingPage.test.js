@@ -1,12 +1,30 @@
+jest.mock("react-router-dom", () => require("../../test/reactRouterDomMock"), { virtual: true });
+
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
 import ComplianceTestingPage from "./ComplianceTestingPage";
 
 const mockLoadTestCategory = jest.fn();
 const mockLoadTestCase = jest.fn();
+const mockLoadTestRunDetail = jest.fn();
+const mockRunFullTestSuite = jest.fn();
+const mockRunTestCase = jest.fn();
+const mockRunTestCategory = jest.fn();
+const mockRefreshTestingWorkspace = jest.fn();
+const mockClearTestRunDetail = jest.fn();
+const mockLoadTaskDetail = jest.fn();
+const mockCreateOrAssignTestTask = jest.fn();
+const mockUpdateTestTask = jest.fn();
+
+let mockContextValue;
 
 jest.mock("./useCompliancePageContext", () => ({
-  useCompliancePageContext: () => ({
+  useCompliancePageContext: () => mockContextValue,
+}));
+
+function buildContext(overrides = {}) {
+  return {
     testDashboard: {
       summary: {
         total_tests: 12,
@@ -16,6 +34,14 @@ jest.mock("./useCompliancePageContext", () => ({
         not_run_tests: 1,
         average_pass_rate: 87,
         total_executions_last_7_days: 34,
+        running_runs: 1,
+        open_failure_tasks: 2,
+        last_full_suite_run: {
+          id: 41,
+          status: "failed",
+          completed_at: "2026-03-11T12:10:00+00:00",
+          run_at: "2026-03-11T12:00:00+00:00",
+        },
       },
       categories: [
         {
@@ -62,6 +88,9 @@ jest.mock("./useCompliancePageContext", () => ({
           file_path: "tests/privacy_tests.py",
           last_duration_ms: 8,
           last_run_timestamp: "2026-03-11T12:00:00+00:00",
+          latest_run_id: 41,
+          execution_supported: true,
+          execution_engine: "pytest",
         },
         {
           test_id: "tests%2Fprivacy_tests.py%3A%3Atest_detect_phone",
@@ -79,6 +108,9 @@ jest.mock("./useCompliancePageContext", () => ({
           file_path: "tests/privacy_tests.py",
           last_duration_ms: 7,
           last_run_timestamp: "2026-03-11T11:00:00+00:00",
+          latest_run_id: 40,
+          execution_supported: true,
+          execution_engine: "pytest",
         },
         {
           test_id: "tests%2Fprivacy_tests.py%3A%3Atest_detect_ssn",
@@ -96,6 +128,9 @@ jest.mock("./useCompliancePageContext", () => ({
           file_path: "tests/privacy_tests.py",
           last_duration_ms: null,
           last_run_timestamp: null,
+          latest_run_id: null,
+          execution_supported: true,
+          execution_engine: "pytest",
         },
       ],
     },
@@ -119,6 +154,8 @@ jest.mock("./useCompliancePageContext", () => ({
       trend: "unstable",
       expected_result: "PII_EMAIL",
       description: "Email detection should classify as PII_EMAIL.",
+      execution_supported: true,
+      latest_run_id: 41,
       latest_execution: {
         output: "classification mismatch",
         error_message: "Detector missed expected email classification.",
@@ -135,7 +172,7 @@ jest.mock("./useCompliancePageContext", () => ({
       },
       history: [
         {
-          run_id: 2,
+          run_id: 41,
           result_id: 22,
           suite_name: "PII validation suite",
           status: "failed",
@@ -145,30 +182,93 @@ jest.mock("./useCompliancePageContext", () => ({
           file_path: "tests/privacy_tests.py",
           error_message: "Detector missed expected email classification.",
           confidence_score: 0.19,
+          output: "classification mismatch",
+        },
+      ],
+      linked_tasks: [
+        {
+          id: 90,
+          task_key: "TASK-090",
+          status: "in_progress",
         },
       ],
     },
+    selectedTestRun: null,
     loadTestCategory: mockLoadTestCategory,
     loadTestCase: mockLoadTestCase,
-    createOrAssignTestTask: jest.fn(),
-    updateTestTask: jest.fn(),
+    loadTestRunDetail: mockLoadTestRunDetail,
+    createOrAssignTestTask: mockCreateOrAssignTestTask,
+    updateTestTask: mockUpdateTestTask,
+    runFullTestSuite: mockRunFullTestSuite,
+    runTestCase: mockRunTestCase,
+    runTestCategory: mockRunTestCategory,
+    refreshTestingWorkspace: mockRefreshTestingWorkspace,
+    clearTestRunDetail: mockClearTestRunDetail,
+    loadTaskDetail: mockLoadTaskDetail,
     data: {
       directory: {
         employees: [
           { id: 1, first_name: "Bo", last_name: "Harris", status: "active" },
         ],
       },
+      testRuns: {
+        runs: [
+          {
+            id: 41,
+            suite_name: "Backend pytest suite",
+            category: "backend tests",
+            run_type: "full_suite",
+            status: "failed",
+            started_at: "2026-03-11T12:00:00+00:00",
+            completed_at: "2026-03-11T12:10:00+00:00",
+            failure_summary: "test_detect_email: Detector missed expected email classification.",
+          },
+          {
+            id: 42,
+            suite_name: "PII validation suite",
+            category: "privacy tests",
+            run_type: "single_test",
+            status: "running",
+            pytest_node_id: "tests/privacy_tests.py::test_detect_email",
+            started_at: "2026-03-11T12:11:00+00:00",
+            completed_at: null,
+          },
+        ],
+      },
     },
-  }),
-}));
+    ...overrides,
+  };
+}
 
 beforeEach(() => {
   mockLoadTestCategory.mockClear();
   mockLoadTestCase.mockClear();
+  mockLoadTestRunDetail.mockClear();
+  mockRunFullTestSuite.mockClear();
+  mockRunTestCase.mockClear();
+  mockRunTestCategory.mockClear();
+  mockRefreshTestingWorkspace.mockClear();
+  mockClearTestRunDetail.mockClear();
+  mockLoadTaskDetail.mockClear();
+  mockCreateOrAssignTestTask.mockClear();
+  mockUpdateTestTask.mockClear();
+  mockRunFullTestSuite.mockResolvedValue(undefined);
+  mockRunTestCase.mockResolvedValue(undefined);
+  mockRunTestCategory.mockResolvedValue(undefined);
+  mockLoadTestRunDetail.mockResolvedValue(undefined);
+  mockContextValue = buildContext();
 });
 
+function renderPage() {
+  return render(
+    <MemoryRouter>
+      <ComplianceTestingPage />
+    </MemoryRouter>,
+  );
+}
+
 test("renders individual tests from the same file separately and shows node metadata", async () => {
-  render(<ComplianceTestingPage />);
+  renderPage();
 
   expect(screen.getByText("test_detect_email")).toBeInTheDocument();
   expect(screen.getByText("test_detect_phone")).toBeInTheDocument();
@@ -183,7 +283,7 @@ test("renders individual tests from the same file separately and shows node meta
 
 test("supports selecting a single test case and filtering by search and file path", async () => {
   const user = userEvent;
-  render(<ComplianceTestingPage />);
+  renderPage();
 
   await user.click(screen.getByText("test_detect_phone"));
   expect(mockLoadTestCase).toHaveBeenCalledWith("tests%2Fprivacy_tests.py%3A%3Atest_detect_phone");
@@ -205,7 +305,7 @@ test("supports selecting a single test case and filtering by search and file pat
 
 test("opens a run history drawer for the selected test and supports closing it", async () => {
   const user = userEvent;
-  render(<ComplianceTestingPage />);
+  renderPage();
 
   await user.click(screen.getByText("test_detect_email"));
 
@@ -221,4 +321,97 @@ test("opens a run history drawer for the selected test and supports closing it",
     expect(screen.queryByRole("dialog", { name: "test_detect_email" })).not.toBeInTheDocument();
   });
   expect(screen.queryByText("Selected Test")).not.toBeInTheDocument();
+});
+
+test("triggers full-suite and category execution controls from the testing console", async () => {
+  const user = userEvent;
+  renderPage();
+
+  await user.click(screen.getByRole("button", { name: "Run Full Test Suite" }));
+  await waitFor(() => {
+    expect(mockRunFullTestSuite).toHaveBeenCalledTimes(1);
+  });
+
+  await user.click(screen.getByRole("button", { name: "Run privacy tests" }));
+  await waitFor(() => {
+    expect(mockRunTestCategory).toHaveBeenCalledWith("privacy tests");
+  });
+});
+
+test("triggers a single test run from the inspector and opens run detail from recent history", async () => {
+  const user = userEvent;
+  mockContextValue = buildContext({
+    data: {
+      directory: {
+        employees: [{ id: 1, first_name: "Bo", last_name: "Harris", status: "active" }],
+      },
+      testRuns: {
+        runs: [
+          {
+            id: 41,
+            suite_name: "Backend pytest suite",
+            category: "backend tests",
+            run_type: "full_suite",
+            status: "failed",
+            started_at: "2026-03-11T12:00:00+00:00",
+            completed_at: "2026-03-11T12:10:00+00:00",
+            failure_summary: "test_detect_email: Detector missed expected email classification.",
+          },
+        ],
+      },
+    },
+  });
+  renderPage();
+
+  await user.click(screen.getByText("test_detect_email"));
+  await user.click(screen.getByRole("button", { name: "Run Test" }));
+  await waitFor(() => {
+    expect(mockRunTestCase).toHaveBeenCalledWith("tests%2Fprivacy_tests.py%3A%3Atest_detect_email");
+  });
+
+  await user.click(screen.getByRole("button", { name: /Backend pytest suite/i }));
+  await waitFor(() => {
+    expect(mockLoadTestRunDetail).toHaveBeenCalledWith(41);
+  });
+});
+
+test("renders run detail with linked remediation tasks when a run is selected", async () => {
+  mockContextValue = buildContext({
+    selectedTestRun: {
+      run: {
+        id: 41,
+        suite_name: "Backend pytest suite",
+        category: "backend tests",
+        run_type: "full_suite",
+        status: "failed",
+        started_at: "2026-03-11T12:00:00+00:00",
+        completed_at: "2026-03-11T12:10:00+00:00",
+        return_code: 1,
+        passed_tests: 1,
+        total_tests: 2,
+        failure_summary: "test_detect_email: Detector missed expected email classification.",
+        stdout: "collected 2 items",
+        stderr: "1 failed, 1 passed",
+      },
+      results: [
+        {
+          id: 22,
+          test_name: "test_detect_email",
+          test_node_id: "tests/privacy_tests.py::test_detect_email",
+          status: "failed",
+          duration_ms: 8,
+          last_run_timestamp: "2026-03-11T12:00:00+00:00",
+          error_details: "Detector missed expected email classification.",
+          linked_tasks: [{ id: 90, task_key: "TASK-090", status: "in_progress" }],
+        },
+      ],
+      linked_tasks: [{ id: 90, task_key: "TASK-090", status: "in_progress" }],
+    },
+  });
+
+  renderPage();
+
+  expect(screen.getByRole("dialog", { name: "Backend pytest suite" })).toBeInTheDocument();
+  expect(screen.getByText("Recorded Results")).toBeInTheDocument();
+  expect(screen.getAllByText(/TASK-090/i).length).toBeGreaterThan(0);
 });

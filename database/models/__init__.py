@@ -28,3 +28,9 @@ from .risk_register_item import RiskRegisterItem
 from .compliance_test_case_result import ComplianceTestCaseResult
 from .code_review import CodeReview
 from .compliance_test_failure_task import ComplianceTestFailureTask
+from .scan_job import ScanJob
+from .organization_membership import OrganizationMembership
+from .api_key import ApiKey
+from .security_event import SecurityEvent
+from .governance_task import GovernanceTask
+from .governance_task_activity import GovernanceTaskActivity

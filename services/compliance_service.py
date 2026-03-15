@@ -409,6 +409,9 @@ def ensure_test_runs(db: Session, organization_id: int) -> None:
             total_tests = len(statuses)
             run = ComplianceTestRun(
                 organization_id=organization_id,
+                run_type="full_suite",
+                trigger_source="seeded",
+                execution_engine="pytest",
                 category=display_name,
                 suite_name=f"{display_name} - {suite_suffix}",
                 dataset_name="seed_baseline",
@@ -420,6 +423,11 @@ def ensure_test_runs(db: Session, organization_id: int) -> None:
                 accuracy_score=Decimal(str(round((passed_tests / max(passed_tests + failed_tests, 1)), 4))),
                 coverage_percent=Decimal("80.00") if matching else Decimal("60.00"),
                 report_link=f"/tests/{key}",
+                started_at=datetime.now(timezone.utc) - timedelta(days=(len(status_windows) - history_index - 1) * 7, minutes=2),
+                completed_at=datetime.now(timezone.utc) - timedelta(days=(len(status_windows) - history_index - 1) * 7),
+                return_code=1 if failed_tests else 0,
+                failure_summary="Seeded governance test failure." if failed_tests else None,
+                metadata_json=_json_dumps({"seeded": True, "selected_node_ids": [f"tests/test_{key}_suite.py::test_{key}_primary_path"]}),
                 run_at=datetime.now(timezone.utc) - timedelta(days=(len(status_windows) - history_index - 1) * 7),
             )
             db.add(run)

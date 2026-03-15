@@ -1,3 +1,4 @@
+import { Button } from "../../button";
 import WorkspaceEmptyState from "../WorkspaceEmptyState";
 import { formatDateTime, formatPercent, statusBadgeClass, statusTone } from "../../../pages/compliance/utils";
 import TestFailureTaskPanel from "./TestFailureTaskPanel";
@@ -11,7 +12,16 @@ function DetailField({ label, children }) {
   );
 }
 
-export default function TestDetailPanel({ test, employees, onCreateTask, onUpdateTask, embedded = false }) {
+export default function TestDetailPanel({
+  test,
+  employees,
+  onCreateTask,
+  onUpdateTask,
+  onRunTest,
+  onViewLatestRun,
+  runPending = false,
+  embedded = false,
+}) {
   if (!test) {
     return <WorkspaceEmptyState title="Select a test case" description="Choose a test from the center panel to inspect execution history, failures, and quality trends." />;
   }
@@ -27,7 +37,27 @@ export default function TestDetailPanel({ test, employees, onCreateTask, onUpdat
           <h2 className="mt-3 break-words text-[1.9rem] font-semibold leading-tight text-app 2xl:text-[2.2rem]">{test.test_name}</h2>
           <p className="mt-3 text-sm leading-6 text-app-secondary">{test.category} | {test.suite_name}</p>
         </div>
-        <span className={`rounded-full px-3 py-1 text-xs font-semibold ${statusBadgeClass(test.status)}`}>{test.status}</span>
+        <div className="flex flex-col items-end gap-3">
+          <span className={`rounded-full px-3 py-1 text-xs font-semibold ${statusBadgeClass(test.status)}`}>{test.status}</span>
+          <div className="flex flex-wrap justify-end gap-2">
+            {test.execution_supported ? (
+              <Button type="button" onClick={() => onRunTest?.(test.test_id)} disabled={runPending}>
+                {runPending ? "Running..." : "Run Test"}
+              </Button>
+            ) : (
+              <span className="rounded-full border border-app/70 px-3 py-2 text-xs text-app-muted">Pytest execution unavailable</span>
+            )}
+            {test.latest_run_id ? (
+              <button
+                type="button"
+                onClick={() => onViewLatestRun?.(test.latest_run_id)}
+                className="rounded-full border border-app px-4 py-2 text-sm font-semibold text-app-secondary transition hover:bg-white/5 hover:text-app"
+              >
+                View latest run
+              </button>
+            ) : null}
+          </div>
+        </div>
       </div>
 
       <div className="mt-7 grid gap-4 sm:grid-cols-2">

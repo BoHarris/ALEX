@@ -28,6 +28,7 @@ class User(Base):
     locale = Column(String, nullable=True)
     profile_picture = Column(String, nullable=True)
     refresh_version = Column(Integer, default=0, nullable=False)
+    has_completed_onboarding = Column(Boolean, default=False, nullable=False)
     
     #Email verification token
     email_verification_token = Column(String, nullable=True)

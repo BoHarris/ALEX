@@ -1,9 +1,11 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Button } from "../../components/button";
 import DetailDrawer from "../../components/compliance/DetailDrawer";
 import RecordTable from "../../components/compliance/RecordTable";
 import SummaryMetricCard from "../../components/compliance/SummaryMetricCard";
 import WorkspaceEmptyState from "../../components/compliance/WorkspaceEmptyState";
+import LinkedTaskPill from "../../components/compliance/tasks/LinkedTaskPill";
 import { useCompliancePageContext } from "./useCompliancePageContext";
 import { formatDateTime, statusTone } from "./utils";
 
@@ -72,8 +74,10 @@ function EmployeeFilterSelect({
 }
 
 export default function ComplianceEmployeesPage() {
+  const navigate = useNavigate();
   const workspace = useCompliancePageContext();
   const employees = workspace.data?.directory?.employees || [];
+  const tasks = workspace.data?.tasks?.tasks || [];
   const assignments = workspace.data?.assignments?.assignments || [];
   const reviews = workspace.data?.reviews?.access_reviews || [];
   const auditEvents = workspace.data?.auditLog?.events || [];
@@ -124,6 +128,9 @@ export default function ComplianceEmployeesPage() {
     );
   });
 
+  const openEmployeeFollowups = tasks.filter(
+    (task) => task.source_type === "employee_followup" && task.is_open,
+  );
   const incompleteProfileCount = employees.filter(
     (employee) => !employee.department || !employee.job_title,
   ).length;
@@ -175,9 +182,7 @@ export default function ComplianceEmployeesPage() {
       !normalizedForm.email ||
       !normalizedForm.role
     ) {
-      setCreateError(
-        "Complete the required employee profile fields before saving.",
-      );
+      setCreateError("Complete the required employee profile fields before saving.");
       return;
     }
     try {
@@ -215,6 +220,27 @@ export default function ComplianceEmployeesPage() {
     }
   }
 
+  async function createEmployeeTask() {
+    if (!selectedEmployee) {
+      return;
+    }
+    setActionError(null);
+    try {
+      await workspace.createTaskFromEmployee(selectedEmployee.id, {});
+      navigate("/compliance/tasks");
+    } catch (err) {
+      setActionError(err.message);
+    }
+  }
+
+  function employeeTasks(employeeId) {
+    return tasks.filter(
+      (task) =>
+        task.source_type === "employee_followup" &&
+        String(task.source_id) === String(employeeId),
+    );
+  }
+
   const columns = [
     {
       key: "name",
@@ -240,6 +266,7 @@ export default function ComplianceEmployeesPage() {
       label: "Job Title",
       render: (row) => row.job_title || "Not set",
     },
+    { key: "tasks", label: "Tasks", render: (row) => employeeTasks(row.id).length },
     {
       key: "status",
       label: "Status",
@@ -270,6 +297,9 @@ export default function ComplianceEmployeesPage() {
           event.resource_type === "employee" &&
           String(event.resource_id) === String(selectedEmployee.id),
       )
+    : [];
+  const selectedTasks = selectedEmployee
+    ? employeeTasks(selectedEmployee.id)
     : [];
   const selectedHasIncompleteProfile = Boolean(
     selectedEmployee &&
@@ -329,7 +359,7 @@ export default function ComplianceEmployeesPage() {
         </div>
       </section>
 
-      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
         <SummaryMetricCard
           label="Directory"
           value={employees.length}
@@ -349,6 +379,11 @@ export default function ComplianceEmployeesPage() {
           label="Incomplete Profiles"
           value={incompleteProfileCount}
           hint="Missing department or job title"
+        />
+        <SummaryMetricCard
+          label="Open Follow-ups"
+          value={openEmployeeFollowups.length}
+          hint="Employee governance tasks still open"
         />
       </section>
 

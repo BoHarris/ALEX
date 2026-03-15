@@ -9,6 +9,15 @@ import services.scan_service as scan_service
 import services.startup_validation as startup_validation
 
 
+def test_auth_utils_import_does_not_require_secret_key(monkeypatch):
+    monkeypatch.delenv("SECRET_KEY", raising=False)
+    auth_utils = importlib.import_module("utils.auth_utils")
+
+    reloaded = importlib.reload(auth_utils)
+
+    assert reloaded is auth_utils
+
+
 def test_scan_service_does_not_load_model_during_import(monkeypatch):
     def _explode(_path):
         raise AssertionError("joblib.load should not run during module import")

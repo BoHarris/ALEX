@@ -10,6 +10,7 @@ import ComplianceEmployeesPage from "./ComplianceEmployeesPage";
 const mockCreateEmployee = jest.fn();
 const mockUpdateEmployee = jest.fn();
 const mockDeactivateEmployee = jest.fn();
+const mockCreateTaskFromEmployee = jest.fn();
 
 let mockContextValue;
 
@@ -60,6 +61,26 @@ function buildContext(overrides = {}) {
           },
         ],
       },
+      tasks: {
+        tasks: [
+          {
+            id: 31,
+            task_key: "TASK-031",
+            source_type: "employee_followup",
+            source_id: "2",
+            status: "todo",
+            is_open: true,
+          },
+          {
+            id: 32,
+            task_key: "TASK-032",
+            source_type: "employee_followup",
+            source_id: "1",
+            status: "done",
+            is_open: false,
+          },
+        ],
+      },
       assignments: { assignments: [] },
       reviews: { access_reviews: [] },
       auditLog: { events: [] },
@@ -67,6 +88,7 @@ function buildContext(overrides = {}) {
     createEmployee: mockCreateEmployee,
     updateEmployee: mockUpdateEmployee,
     deactivateEmployee: mockDeactivateEmployee,
+    createTaskFromEmployee: mockCreateTaskFromEmployee,
     ...overrides,
   };
 }
@@ -75,9 +97,11 @@ beforeEach(() => {
   mockCreateEmployee.mockClear();
   mockUpdateEmployee.mockClear();
   mockDeactivateEmployee.mockClear();
+  mockCreateTaskFromEmployee.mockClear();
   mockCreateEmployee.mockResolvedValue({});
   mockUpdateEmployee.mockResolvedValue({});
   mockDeactivateEmployee.mockResolvedValue({});
+  mockCreateTaskFromEmployee.mockResolvedValue({});
   mockContextValue = buildContext();
 });
 
@@ -94,6 +118,7 @@ test("renders employee summary metrics and filters the directory by status", asy
 
   expect(screen.getByText("Directory")).toBeInTheDocument();
   expect(screen.getByText("Incomplete Profiles")).toBeInTheDocument();
+  expect(screen.getByText("Open Follow-ups")).toBeInTheDocument();
   expect(screen.getByText("Ada Lovelace")).toBeInTheDocument();
   expect(screen.getByText("Bashir Cole")).toBeInTheDocument();
 

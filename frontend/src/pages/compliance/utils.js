@@ -22,16 +22,16 @@ export function formatDate(value) {
 
 export function statusTone(status = "") {
   const normalized = status.toLowerCase();
-  if (["failed", "high", "closed", "inactive", "archived", "revoked", "degrading", "failing", "regressed"].includes(normalized)) {
+  if (["failed", "high", "critical", "closed", "inactive", "archived", "revoked", "degrading", "failing", "regressed", "canceled", "overdue"].includes(normalized)) {
     return "text-rose-600";
   }
-  if (["completed", "approved", "published", "active", "passed", "stable", "improving"].includes(normalized)) {
+  if (["completed", "approved", "published", "active", "passed", "stable", "improving", "low", "done"].includes(normalized)) {
     return "text-emerald-600";
   }
-  if (["pending", "investigating", "in_review", "flagged", "skipped", "not_run", "resolved"].includes(normalized)) {
+  if (["pending", "todo", "investigating", "in_review", "flagged", "skipped", "not_run", "resolved", "medium", "queued"].includes(normalized)) {
     return "text-amber-600";
   }
-  if (["flaky", "unstable", "running"].includes(normalized)) {
+  if (["flaky", "unstable", "running", "in_progress", "blocked"].includes(normalized)) {
     return "text-cyan-300";
   }
   return "text-app-secondary";
@@ -39,16 +39,16 @@ export function statusTone(status = "") {
 
 export function statusBadgeClass(status = "") {
   const normalized = status.toLowerCase();
-  if (["failed", "high", "closed", "inactive", "archived", "revoked", "degrading", "failing", "regressed"].includes(normalized)) {
+  if (["failed", "high", "critical", "closed", "inactive", "archived", "revoked", "degrading", "failing", "regressed", "canceled", "overdue"].includes(normalized)) {
     return "bg-rose-500/15 text-rose-300 border border-rose-400/30";
   }
-  if (["completed", "approved", "published", "active", "passed", "stable", "improving"].includes(normalized)) {
+  if (["completed", "approved", "published", "active", "passed", "stable", "improving", "low", "done"].includes(normalized)) {
     return "bg-emerald-500/15 text-emerald-300 border border-emerald-400/30";
   }
-  if (["pending", "investigating", "in_review", "flagged", "skipped", "not_run", "resolved"].includes(normalized)) {
+  if (["pending", "todo", "investigating", "in_review", "flagged", "skipped", "not_run", "resolved", "medium", "queued"].includes(normalized)) {
     return "bg-amber-500/15 text-amber-200 border border-amber-400/30";
   }
-  if (["flaky", "unstable", "running"].includes(normalized)) {
+  if (["flaky", "unstable", "running", "in_progress", "blocked"].includes(normalized)) {
     return "bg-cyan-500/15 text-cyan-200 border border-cyan-400/30";
   }
   return "bg-white/5 text-app-secondary border border-app";

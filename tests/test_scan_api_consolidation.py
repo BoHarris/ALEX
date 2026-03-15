@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import uuid
+import zipfile
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -13,10 +14,13 @@ from sqlalchemy.pool import StaticPool
 from database.database import Base, get_db
 from database.models.company import Company
 from database.models.company_settings import CompanySettings
+from database.models.scan_job import ScanJob
 from database.models.scan_results import ScanResult
+from database.models.security_event import SecurityEvent
 from database.models.user import User
 from dependencies.tier_guard import get_current_user_context
 from routers import scans as scans_router
+from services import scan_job_service
 from services.scan_service import ScanPipelineResult
 from utils.constants import SUPPORTED_EXTENSIONS_SORTED
 from utils.pii_taxonomy import GDPR_PERSONAL_DATA, HIPAA_IDENTIFIER, PII_EMAIL
@@ -36,7 +40,14 @@ def _session():
     )
     Base.metadata.create_all(
         bind=engine,
-        tables=[Company.__table__, CompanySettings.__table__, User.__table__, ScanResult.__table__],
+        tables=[
+            Company.__table__,
+            CompanySettings.__table__,
+            User.__table__,
+            ScanResult.__table__,
+            ScanJob.__table__,
+            SecurityEvent.__table__,
+        ],
     )
     return sessionmaker(bind=engine, autocommit=False, autoflush=False)
 
@@ -69,17 +80,20 @@ def test_post_scans_creates_scan_and_legacy_predict_route_is_not_mounted(monkeyp
 
     monkeypatch.chdir(base)
     monkeypatch.setattr(scans_router, "record_audit_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(scan_job_service, "record_audit_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(scan_job_service, "record_security_event", lambda *args, **kwargs: None)
     monkeypatch.setattr(scans_router, "register_scan_activity", lambda *args, **kwargs: None)
     monkeypatch.setattr(scans_router, "reserve_scan_quota", lambda *args, **kwargs: True)
     monkeypatch.setattr(scans_router, "release_scan_quota_reservation", lambda *args, **kwargs: None)
     monkeypatch.setattr(scans_router, "extract_request_security_context", lambda request: {})
+    monkeypatch.setattr(scans_router, "_sanitize_redacted_output_file", lambda **kwargs: kwargs["file_path"])
 
     async def _inline_run_in_threadpool(func):
         return func()
 
     monkeypatch.setattr(scans_router, "run_in_threadpool", _inline_run_in_threadpool)
     monkeypatch.setattr(
-        scans_router,
+        scan_job_service,
         "run_scan_pipeline",
         lambda **kwargs: ScanPipelineResult(
             filename="sample.csv",
@@ -201,7 +215,14 @@ def test_scan_download_and_report_routes_return_assets(monkeypatch):
     monkeypatch.setattr(scans_router, "BASE_DIR", base)
     monkeypatch.setattr(scans_router, "REDACTED_BASE_DIR", redacted_dir.resolve())
     monkeypatch.setattr(scans_router, "record_audit_event", lambda *args, **kwargs: None)
-    monkeypatch.setattr(scans_router, "generate_audit_report_html", lambda scan: "<html><body>Audit report</body></html>")
+    def _cache_html_report(_db, _scan):
+        reports_dir = base / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        html_path = reports_dir / "audit-report.html"
+        html_path.write_text("<html><body>Audit report</body></html>", encoding="utf-8")
+        return html_path
+
+    monkeypatch.setattr(scans_router, "cache_html_report", _cache_html_report)
 
     try:
         download = client.get(f"/scans/{scan.id}/download")
@@ -240,13 +261,14 @@ def test_post_scans_accepts_xls_when_backend_supports_it(monkeypatch):
     monkeypatch.setattr(scans_router, "reserve_scan_quota", lambda *args, **kwargs: True)
     monkeypatch.setattr(scans_router, "release_scan_quota_reservation", lambda *args, **kwargs: None)
     monkeypatch.setattr(scans_router, "extract_request_security_context", lambda request: {})
+    monkeypatch.setattr(scans_router, "_sanitize_redacted_output_file", lambda **kwargs: kwargs["file_path"])
 
     async def _inline_run_in_threadpool(func):
         return func()
 
     monkeypatch.setattr(scans_router, "run_in_threadpool", _inline_run_in_threadpool)
     monkeypatch.setattr(
-        scans_router,
+        scan_job_service,
         "run_scan_pipeline",
         lambda **kwargs: ScanPipelineResult(
             filename="sheet.xls",
@@ -272,6 +294,55 @@ def test_post_scans_accepts_xls_when_backend_supports_it(monkeypatch):
         shutil.rmtree(base, ignore_errors=True)
 
 
+def test_post_scans_converts_xls_pipeline_output_to_xlsx_without_changing_display_name(monkeypatch):
+    base = _make_local_test_dir()
+    session_factory = _session()
+    app = _build_app(session_factory)
+    client = TestClient(app)
+
+    captured = {}
+    monkeypatch.chdir(base)
+    monkeypatch.setattr(scans_router, "record_audit_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(scan_job_service, "record_audit_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(scan_job_service, "record_security_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(scans_router, "register_scan_activity", lambda *args, **kwargs: None)
+    monkeypatch.setattr(scans_router, "reserve_scan_quota", lambda *args, **kwargs: True)
+    monkeypatch.setattr(scans_router, "release_scan_quota_reservation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(scans_router, "extract_request_security_context", lambda request: {})
+    monkeypatch.setattr(scans_router, "_sanitize_redacted_output_file", lambda **kwargs: kwargs["file_path"])
+
+    async def _inline_run_in_threadpool(func):
+        return func()
+
+    def _capturing_pipeline(**kwargs):
+        captured["filename"] = kwargs["filename"]
+        return ScanPipelineResult(
+            filename="sheet.xlsx",
+            pii_columns=[],
+            redacted_file="redacted/redacted_sheet.xlsx",
+            risk_score=0,
+            redacted_count=0,
+            total_values=0,
+            redacted_type_counts={},
+            detection_results=[],
+            scan_id=99,
+        )
+
+    monkeypatch.setattr(scans_router, "run_in_threadpool", _inline_run_in_threadpool)
+    monkeypatch.setattr(scan_job_service, "run_scan_pipeline", _capturing_pipeline)
+
+    try:
+        response = client.post(
+            "/scans",
+            files={"file": ("sheet.xls", b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1rest", "application/vnd.ms-excel")},
+        )
+        assert response.status_code == 200
+        assert captured["filename"] == "sheet.xlsx"
+        assert response.json()["filename"] == "sheet.xls"
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
 def test_post_scans_rejects_unsupported_file_type():
     session_factory = _session()
     app = _build_app(session_factory)
@@ -284,3 +355,53 @@ def test_post_scans_rejects_unsupported_file_type():
 
     assert response.status_code == 400
     assert response.json()["detail"]["error_code"] == "unsupported_file_type"
+
+
+def test_post_scans_rejects_xml_with_dtd_payload(monkeypatch):
+    session_factory = _session()
+    app = _build_app(session_factory)
+    client = TestClient(app)
+    monkeypatch.setattr(scans_router, "record_audit_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(scans_router, "extract_request_security_context", lambda request: {})
+
+    response = client.post(
+        "/scans",
+        files={"file": ("sample.xml", b'<!DOCTYPE foo [<!ENTITY xxe "bad">]><root><item>ok</item></root>', "application/xml")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error_code"] == "validation_error"
+
+
+def test_post_scans_rejects_unsafe_archive_structure(monkeypatch):
+    import io
+
+    base = _make_local_test_dir()
+    session_factory = _session()
+    app = _build_app(session_factory)
+    client = TestClient(app)
+
+    archive_buffer = io.BytesIO()
+    with zipfile.ZipFile(archive_buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("xl/sharedStrings.xml", "A" * 4000)
+
+    monkeypatch.chdir(base)
+    monkeypatch.setattr(scans_router, "ARCHIVE_MAX_COMPRESSION_RATIO", 2.0)
+    monkeypatch.setattr(scans_router, "record_audit_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(scans_router, "extract_request_security_context", lambda request: {})
+
+    try:
+        response = client.post(
+            "/scans",
+            files={
+                "file": (
+                    "bomb.xlsx",
+                    archive_buffer.getvalue(),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+        assert response.status_code == 400
+        assert response.json()["detail"]["error_code"] == "validation_error"
+    finally:
+        shutil.rmtree(base, ignore_errors=True)

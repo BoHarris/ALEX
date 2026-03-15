@@ -15,6 +15,7 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+
 def hash_refresh_jti(refresh_jti: str) -> str:
     return hashlib.sha256(refresh_jti.encode("utf-8")).hexdigest()
 
@@ -24,6 +25,7 @@ class RefreshSessionValidationResult:
     ok: bool
     reason: str | None = None
     session: RefreshSession | None = None
+
 
 
 def create_refresh_session(
@@ -37,12 +39,14 @@ def create_refresh_session(
         user_id=user_id,
         refresh_jti_hash=hash_refresh_jti(refresh_jti),
         session_binding_hash=context.session_binding_hash,
-        issued_ip_address=context.ip_address,
-        last_seen_ip_address=context.ip_address,
+        device_info=getattr(context, "user_agent", None),
+        issued_ip_address=getattr(context, "ip_address", None),
+        last_seen_ip_address=getattr(context, "ip_address", None),
         last_seen_at=_utcnow(),
     )
     db.add(session)
     return session
+
 
 
 def issue_bound_refresh_token(
@@ -62,12 +66,14 @@ def issue_bound_refresh_token(
     return refresh_token
 
 
+
 def get_refresh_session(db: Session, *, refresh_jti: str) -> RefreshSession | None:
     return (
         db.query(RefreshSession)
         .filter(RefreshSession.refresh_jti_hash == hash_refresh_jti(refresh_jti))
         .first()
     )
+
 
 
 def validate_refresh_session(
@@ -91,9 +97,11 @@ def validate_refresh_session(
         return RefreshSessionValidationResult(ok=False, reason="binding_mismatch", session=session)
 
     session.last_seen_at = _utcnow()
-    session.last_seen_ip_address = context.ip_address
+    session.last_seen_ip_address = getattr(context, "ip_address", None)
+    session.device_info = getattr(context, "user_agent", None) or session.device_info
     db.add(session)
     return RefreshSessionValidationResult(ok=True, session=session)
+
 
 
 def rotate_refresh_session(
@@ -105,10 +113,12 @@ def rotate_refresh_session(
 ) -> RefreshSession:
     session.refresh_jti_hash = hash_refresh_jti(new_refresh_jti)
     session.session_binding_hash = context.session_binding_hash or session.session_binding_hash
+    session.device_info = getattr(context, "user_agent", None) or session.device_info
     session.last_seen_at = _utcnow()
-    session.last_seen_ip_address = context.ip_address
+    session.last_seen_ip_address = getattr(context, "ip_address", None)
     db.add(session)
     return session
+
 
 
 def revoke_refresh_session(
@@ -118,6 +128,7 @@ def revoke_refresh_session(
 ) -> RefreshSession | None:
     session = get_refresh_session(db, refresh_jti=refresh_jti)
     return revoke_refresh_session_record(db, session=session)
+
 
 
 def revoke_refresh_session_record(
@@ -131,3 +142,11 @@ def revoke_refresh_session_record(
     session.revoked_at = _utcnow()
     db.add(session)
     return session
+
+
+
+def revoke_all_user_sessions(db: Session, *, user_id: int) -> int:
+    sessions = db.query(RefreshSession).filter(RefreshSession.user_id == user_id, RefreshSession.revoked.is_(False)).all()
+    for session in sessions:
+        revoke_refresh_session_record(db, session=session)
+    return len(sessions)

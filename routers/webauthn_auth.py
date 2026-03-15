@@ -20,6 +20,7 @@ from services.refresh_session_service import issue_bound_refresh_token
 from services.security_service import enforce_auth_rate_limit, extract_request_security_context, register_failed_login
 from utils.auth_utils import create_access_token, ensure_user_is_active
 from utils.api_errors import error_payload
+from utils.security_events import record_security_event
 from utils.rbac import ROLE_ORG_ADMIN, ROLE_USER, normalize_role
 
 from webauthn import (
@@ -49,6 +50,18 @@ IS_PROD = os.getenv("ENV", "development").lower() == "production"
 AUTH_RATE_WINDOW_SECONDS = int(os.getenv("AUTH_RATE_WINDOW_SECONDS", "60"))
 AUTH_RATE_LIMIT_PER_IP = int(os.getenv("AUTH_RATE_LIMIT_PER_IP", "30"))
 AUTH_RATE_LIMIT_PER_IDENTIFIER = int(os.getenv("AUTH_RATE_LIMIT_PER_IDENTIFIER", "10"))
+
+
+def _demo_workspace_seeding_enabled() -> bool:
+    configured = (os.getenv("ENABLE_DEMO_WORKSPACE_SEEDING") or "").strip().lower()
+    if configured:
+        return configured == "true"
+    return os.getenv("ENV", "development").strip().lower() != "production"
+
+
+def _seed_demo_workspace_if_enabled(db: Session) -> None:
+    if _demo_workspace_seeding_enabled():
+        ensure_default_company_and_employee(db)
 
 
 
@@ -84,6 +97,7 @@ class EmployeeWebAuthnStatusRequest(BaseModel):
 
 class EmployeeWebAuthnRegisterVerifyRequest(BaseModel):
     email: str
+    user_id: int | None = None
     credential: dict
 
 
@@ -408,6 +422,70 @@ def _create_user_from_pending_registration(
     return user
 
 
+def _load_employee_user(db: Session, employee: Employee) -> User | None:
+    if employee.user_id:
+        user = db.query(User).filter(User.id == employee.user_id).first()
+        if user:
+            return user
+    return db.query(User).filter(User.email == employee.email.strip().lower()).first()
+
+
+def _create_employee_pending_registration(
+    *,
+    db: Session,
+    employee: Employee,
+    challenge: str,
+    user: User | None,
+) -> PendingRegistration:
+    _cleanup_expired_pending_registrations(db)
+    safe_email = employee.email.strip().lower()
+    db.query(PendingRegistration).filter(PendingRegistration.email == safe_email).delete()
+    registration = PendingRegistration(
+        email=safe_email,
+        first_name=employee.first_name,
+        last_name=employee.last_name,
+        company_name=None,
+        create_company=False,
+        company_id=employee.company_id,
+        role=normalize_role(employee.role),
+        webauthn_user_handle=(user.webauthn_user_handle if user and user.webauthn_user_handle else _new_user_handle()),
+        challenge=challenge,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=CHALLENGE_TTL_MINUTES),
+    )
+    db.add(registration)
+    db.commit()
+    db.refresh(registration)
+    return registration
+
+
+def _get_employee_pending_registration(
+    *,
+    db: Session,
+    employee: Employee,
+    registration_id: int | None,
+) -> PendingRegistration | None:
+    if registration_id is not None:
+        registration = _get_valid_pending_registration(db, registration_id)
+    else:
+        _cleanup_expired_pending_registrations(db)
+        registration = (
+            db.query(PendingRegistration)
+            .filter(
+                PendingRegistration.email == employee.email.strip().lower(),
+                PendingRegistration.company_id == employee.company_id,
+            )
+            .order_by(PendingRegistration.id.desc())
+            .first()
+        )
+        if registration is not None:
+            registration = _get_valid_pending_registration(db, registration.id)
+    if not registration:
+        return None
+    if registration.email != employee.email.strip().lower() or registration.company_id != employee.company_id:
+        return None
+    return registration
+
+
 def _load_employee_by_email(db: Session, email: str) -> Employee:
     employee = db.query(Employee).filter(Employee.email == email.strip().lower(), Employee.status == "active").first()
     if not employee:
@@ -512,60 +590,48 @@ def employee_webauthn_register_options(
     payload: EmployeeWebAuthnRegisterOptionsRequest = Body(...),
     db: Session = Depends(get_db),
 ):
-    ensure_default_company_and_employee(db)
+    _seed_demo_workspace_if_enabled(db)
     _enforce_auth_rate_limit(db=db, request=request, identifier=payload.email)
     safe_email = _clean_required(payload.email, "email").lower()
     employee = _load_employee_by_email(db, safe_email)
-    user = db.query(User).filter(User.id == employee.user_id).first() if employee.user_id else db.query(User).filter(User.email == safe_email).first()
-    if not user:
-        user = User(
-            first_name=employee.first_name,
-            last_name=employee.last_name,
-            email=employee.email,
-            company_id=employee.company_id,
-            role=normalize_role(employee.role),
-            tier="business",
-            webauthn_user_handle=_new_user_handle(),
-        )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-        employee.user_id = user.id
-        db.add(employee)
-        db.commit()
-    elif not user.webauthn_user_handle:
-        user.webauthn_user_handle = _new_user_handle()
-        db.add(user)
-        db.commit()
-        db.refresh(user)
+    user = _load_employee_user(db, employee)
+    if user:
+        _ensure_authenticating_user_is_active(user)
+    challenge_b64 = bytes_to_base64url(secrets.token_bytes(32))
+    registration = _create_employee_pending_registration(
+        db=db,
+        employee=employee,
+        challenge=challenge_b64,
+        user=user,
+    )
 
     options = generate_registration_options(
         rp_id=RP_ID,
         rp_name=f"{RP_NAME} Employee",
-        user_id=base64url_to_bytes(user.webauthn_user_handle),
-        user_name=user.email,
-        user_display_name=f"{user.first_name} {user.last_name}",
+        challenge=base64url_to_bytes(challenge_b64),
+        user_id=base64url_to_bytes(registration.webauthn_user_handle),
+        user_name=registration.email,
+        user_display_name=f"{registration.first_name} {registration.last_name}",
         attestation=AttestationConveyancePreference.NONE,
         authenticator_selection=AuthenticatorSelectionCriteria(
             resident_key=ResidentKeyRequirement.PREFERRED,
             user_verification=UserVerificationRequirement.PREFERRED,
         ),
     )
-    challenge_b64 = bytes_to_base64url(options.challenge)
-    _store_challenge(db, user.id, challenge_b64, "employee_register")
     record_audit_event(
         db,
         company_id=employee.company_id,
-        user_id=user.id,
+        user_id=user.id if user else None,
         event_type="employee_registration_started",
         event_category="authentication",
         description="Employee passkey enrollment initiated.",
-        target_type="employee",
-        target_id=str(employee.id),
+        target_type="pending_registration",
+        target_id=str(registration.id),
         request_context=extract_request_security_context(request),
+        event_metadata={"employee_id": employee.id},
     )
     db.commit()
-    return {"user_id": user.id, "options": _serialize_webauthn_value(options)}
+    return {"user_id": registration.id, "options": _serialize_webauthn_value(options)}
 
 
 @router.post("/employee/webauthn/status")
@@ -573,7 +639,7 @@ def employee_webauthn_status(
     payload: EmployeeWebAuthnStatusRequest = Body(...),
     db: Session = Depends(get_db),
 ):
-    ensure_default_company_and_employee(db)
+    _seed_demo_workspace_if_enabled(db)
     safe_email = _clean_required(payload.email, "email").lower()
     employee = db.query(Employee).filter(Employee.email == safe_email).first()
     if not employee:
@@ -583,11 +649,11 @@ def employee_webauthn_status(
             "is_active": False,
         }
 
-    user = db.query(User).filter(User.id == employee.user_id).first() if employee.user_id else None
+    user = _load_employee_user(db, employee)
     return {
         "employee_found": True,
         "passkey_enrolled": bool(user and user.webauthn_credential_id),
-        "is_active": employee.status == "active" and bool(user and user.is_active),
+        "is_active": employee.status == "active" and (bool(user.is_active) if user else True),
     }
 
 
@@ -599,14 +665,15 @@ def employee_webauthn_register_verify(
 ):
     safe_email = _clean_required(payload.email, "email").lower()
     employee = _load_employee_by_email(db, safe_email)
-    user = db.query(User).filter(User.id == employee.user_id).first() if employee.user_id else None
-    if not user:
-        raise HTTPException(
-            status_code=404,
-            detail=error_payload(detail="Employee account not found", error_code="employee_not_found"),
-        )
-    expected_challenge_b64 = _get_valid_challenge(db, user.id, "employee_register")
-    if not expected_challenge_b64:
+    user = _load_employee_user(db, employee)
+    if user:
+        _ensure_authenticating_user_is_active(user)
+    registration = _get_employee_pending_registration(
+        db=db,
+        employee=employee,
+        registration_id=payload.user_id,
+    )
+    if not registration:
         raise HTTPException(
             status_code=400,
             detail=error_payload(detail="Missing registration challenge", error_code="session_expired"),
@@ -614,22 +681,41 @@ def employee_webauthn_register_verify(
     try:
         verification = verify_registration_response(
             credential=payload.credential,
-            expected_challenge=base64url_to_bytes(expected_challenge_b64),
+            expected_challenge=base64url_to_bytes(registration.challenge),
             expected_origin=ORIGIN,
             expected_rp_id=RP_ID,
             require_user_verification=True,
         )
     except Exception:
+        _delete_pending_registration(db, registration.id)
         raise HTTPException(
             status_code=400,
             detail=error_payload(detail="Registration verification failed", error_code="validation_error"),
         )
+    if not user:
+        user = User(
+            first_name=employee.first_name,
+            last_name=employee.last_name,
+            email=employee.email,
+            company_id=employee.company_id,
+            role=normalize_role(employee.role),
+            tier="business",
+            webauthn_user_handle=registration.webauthn_user_handle,
+        )
+        db.add(user)
+        db.flush()
+    else:
+        user.company_id = employee.company_id
+        user.role = normalize_role(employee.role)
+        user.webauthn_user_handle = user.webauthn_user_handle or registration.webauthn_user_handle
     user.webauthn_credential_id = bytes_to_base64url(verification.credential_id)
     user.webauthn_public_key = bytes_to_base64url(verification.credential_public_key)
     user.webauthn_sign_count = verification.sign_count or 0
+    employee.user_id = user.id
     db.add(user)
+    db.add(employee)
     db.commit()
-    _delete_challenge(db, user.id, "employee_register")
+    _delete_pending_registration(db, registration.id)
     record_audit_event(
         db,
         company_id=employee.company_id,
@@ -757,12 +843,23 @@ def webauthn_login_options(
     _cleanup_expired_challenges(db)
     user = db.query(User).filter(User.email == safe_email).first()
     if not user or not user.webauthn_credential_id:
+        request_context = extract_request_security_context(request)
         register_failed_login(
             db,
             email=safe_email,
             organization_id=user.company_id if user else None,
             user_id=user.id if user else None,
-            context=extract_request_security_context(request),
+            context=request_context,
+        )
+        record_security_event(
+            db,
+            company_id=user.company_id if user else None,
+            user_id=user.id if user else None,
+            event_type="LOGIN_FAILURE",
+            severity="medium",
+            description="Login options requested for an account without a registered passkey.",
+            ip_address=request_context.ip_address,
+            event_metadata={"email": safe_email},
         )
         record_audit_event(
             db,
@@ -834,12 +931,23 @@ def webauthn_login_verify(
     _cleanup_expired_challenges(db)
     user = db.query(User).filter(User.email == safe_email).first()
     if not user or not user.webauthn_credential_id:
+        request_context = extract_request_security_context(request)
         register_failed_login(
             db,
             email=safe_email,
             organization_id=user.company_id if user else None,
             user_id=user.id if user else None,
-            context=extract_request_security_context(request),
+            context=request_context,
+        )
+        record_security_event(
+            db,
+            company_id=user.company_id if user else None,
+            user_id=user.id if user else None,
+            event_type="LOGIN_FAILURE",
+            severity="medium",
+            description="Invalid passkey login attempt.",
+            ip_address=request_context.ip_address,
+            event_metadata={"email": safe_email},
         )
         record_audit_event(
             db,
@@ -896,12 +1004,23 @@ def webauthn_login_verify(
             require_user_verification=True,
         )
     except Exception:
+        request_context = extract_request_security_context(request)
         register_failed_login(
             db,
             email=safe_email,
             organization_id=user.company_id,
             user_id=user.id,
-            context=extract_request_security_context(request),
+            context=request_context,
+        )
+        record_security_event(
+            db,
+            company_id=user.company_id,
+            user_id=user.id,
+            event_type="LOGIN_FAILURE",
+            severity="medium",
+            description="Passkey login verification failed.",
+            ip_address=request_context.ip_address,
+            event_metadata={"email": safe_email},
         )
         record_audit_event(
             db,
@@ -940,6 +1059,15 @@ def webauthn_login_verify(
         target_id=str(user.id),
         request_context=extract_request_security_context(request),
     )
+    record_security_event(
+        db,
+        company_id=user.company_id,
+        user_id=user.id,
+        event_type="LOGIN_SUCCESS",
+        severity="low",
+        description="User authenticated with passkey.",
+        ip_address=extract_request_security_context(request).ip_address,
+    )
     db.commit()
 
     access_token = create_access_token(
@@ -968,11 +1096,11 @@ def employee_webauthn_login_options(
     payload: WebAuthnLoginOptionsRequest,
     db: Session = Depends(get_db),
 ):
-    ensure_default_company_and_employee(db)
+    _seed_demo_workspace_if_enabled(db)
     _enforce_auth_rate_limit(db=db, request=request, identifier=payload.email)
     safe_email = _clean_required(payload.email, "email").lower()
     employee = _load_employee_by_email(db, safe_email)
-    user = db.query(User).filter(User.id == employee.user_id).first() if employee.user_id else None
+    user = _load_employee_user(db, employee)
     if not user or not user.webauthn_credential_id:
         raise HTTPException(
             status_code=400,
@@ -999,14 +1127,25 @@ def employee_webauthn_login_verify(
     _enforce_auth_rate_limit(db=db, request=request, identifier=payload.email)
     safe_email = _clean_required(payload.email, "email").lower()
     employee = _load_employee_by_email(db, safe_email)
-    user = db.query(User).filter(User.id == employee.user_id).first() if employee.user_id else None
+    user = _load_employee_user(db, employee)
     if not user or not user.webauthn_credential_id:
+        request_context = extract_request_security_context(request)
         register_failed_login(
             db,
             email=safe_email,
             organization_id=employee.company_id,
             user_id=user.id if user else None,
-            context=extract_request_security_context(request),
+            context=request_context,
+        )
+        record_security_event(
+            db,
+            company_id=employee.company_id,
+            user_id=user.id if user else None,
+            event_type="LOGIN_FAILURE",
+            severity="medium",
+            description="Invalid employee passkey login attempt.",
+            ip_address=request_context.ip_address,
+            event_metadata={"email": safe_email},
         )
         db.commit()
         raise HTTPException(
@@ -1031,12 +1170,23 @@ def employee_webauthn_login_verify(
             require_user_verification=True,
         )
     except Exception:
+        request_context = extract_request_security_context(request)
         register_failed_login(
             db,
             email=safe_email,
             organization_id=employee.company_id,
             user_id=user.id,
-            context=extract_request_security_context(request),
+            context=request_context,
+        )
+        record_security_event(
+            db,
+            company_id=employee.company_id,
+            user_id=user.id,
+            event_type="LOGIN_FAILURE",
+            severity="medium",
+            description="Employee passkey login verification failed.",
+            ip_address=request_context.ip_address,
+            event_metadata={"email": safe_email},
         )
         db.commit()
         raise HTTPException(
@@ -1061,6 +1211,16 @@ def employee_webauthn_login_verify(
         target_id=str(employee.id),
         request_context=extract_request_security_context(request),
         event_metadata={"employee_role": employee.role},
+    )
+    record_security_event(
+        db,
+        company_id=employee.company_id,
+        user_id=user.id,
+        event_type="LOGIN_SUCCESS",
+        severity="low",
+        description="Employee authenticated to the compliance workspace.",
+        ip_address=extract_request_security_context(request).ip_address,
+        event_metadata={"employee": True},
     )
     db.commit()
     access_token = create_access_token(

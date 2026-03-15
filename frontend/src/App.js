@@ -19,6 +19,7 @@ import ComplianceEmployeesPage from "./pages/compliance/ComplianceEmployeesPage"
 import CompliancePoliciesPage from "./pages/compliance/CompliancePoliciesPage";
 import ComplianceVendorsPage from "./pages/compliance/ComplianceVendorsPage";
 import ComplianceIncidentsPage from "./pages/compliance/ComplianceIncidentsPage";
+import ComplianceTasksPage from "./pages/compliance/ComplianceTasksPage";
 import ComplianceRisksPage from "./pages/compliance/ComplianceRisksPage";
 import ComplianceAccessReviewsPage from "./pages/compliance/ComplianceAccessReviewsPage";
 import ComplianceTrainingPage from "./pages/compliance/ComplianceTrainingPage";
@@ -114,6 +115,7 @@ function AppShell() {
             <Route path="policies" element={<CompliancePoliciesPage />} />
             <Route path="vendors" element={<ComplianceVendorsPage />} />
             <Route path="incidents" element={<ComplianceIncidentsPage />} />
+            <Route path="tasks" element={<ComplianceTasksPage />} />
             <Route path="risks" element={<ComplianceRisksPage />} />
             <Route path="access-reviews" element={<ComplianceAccessReviewsPage />} />
             <Route path="training" element={<ComplianceTrainingPage />} />

@@ -10,6 +10,7 @@ from database.models.compliance_test_failure_task import ComplianceTestFailureTa
 from database.models.compliance_test_run import ComplianceTestRun
 from database.models.employee import Employee
 from services.compliance_service import add_activity, create_compliance_record, log_compliance_audit, serialize_compliance_record
+from services.governance_task_service import create_test_failure_remediation_task
 from services.test_discovery_service import build_test_node_id
 
 
@@ -58,6 +59,39 @@ def _serialize_assignee(employee: Employee | None) -> dict | None:
         "email": employee.email,
         "role": employee.role,
     }
+
+
+def _sync_governance_task(
+    db: Session,
+    *,
+    organization_id: int,
+    test_node_id: str,
+    test_name: str,
+    title: str,
+    description: str,
+    priority: str,
+    actor_employee_id: int | None,
+    actor_user_id: int | None,
+    assignee_employee_id: int | None,
+    latest_failed_run_id: int,
+    latest_failed_result_id: int,
+) -> None:
+    create_test_failure_remediation_task(
+        db,
+        company_id=organization_id,
+        test_node_id=test_node_id,
+        test_name=test_name,
+        title=title,
+        description=description,
+        priority=priority,
+        actor_employee_id=actor_employee_id,
+        actor_user_id=actor_user_id,
+        assignee_employee_id=assignee_employee_id,
+        metadata={
+            "latest_failed_run_id": latest_failed_run_id,
+            "latest_failed_result_id": latest_failed_result_id,
+        },
+    )
 
 
 def serialize_failure_task(task: ComplianceTestFailureTask, *, record: ComplianceRecord | None = None, assignee: Employee | None = None) -> dict:
@@ -194,6 +228,20 @@ def upsert_failure_task_for_result(
             metadata={"test_node_id": test_node_id, "latest_failed_run_id": run.id},
         )
         db.flush()
+        _sync_governance_task(
+            db,
+            organization_id=run.organization_id,
+            test_node_id=test_node_id,
+            test_name=result.name,
+            title=task.title,
+            description=description,
+            priority=task.priority,
+            actor_employee_id=actor_employee_id,
+            actor_user_id=actor_user_id,
+            assignee_employee_id=task.assignee_employee_id,
+            latest_failed_run_id=run.id,
+            latest_failed_result_id=result.id,
+        )
         return serialize_failure_task(task, record=record, assignee=None)
 
     existing.latest_failed_run_id = run.id
@@ -217,6 +265,20 @@ def upsert_failure_task_for_result(
         )
     db.add(existing)
     db.flush()
+    _sync_governance_task(
+        db,
+        organization_id=run.organization_id,
+        test_node_id=test_node_id,
+        test_name=result.name,
+        title=existing.title,
+        description=description,
+        priority=existing.priority,
+        actor_employee_id=actor_employee_id,
+        actor_user_id=actor_user_id,
+        assignee_employee_id=existing.assignee_employee_id,
+        latest_failed_run_id=run.id,
+        latest_failed_result_id=result.id,
+    )
     assignee = db.query(Employee).filter(Employee.id == existing.assignee_employee_id).first() if existing.assignee_employee_id else None
     return serialize_failure_task(existing, record=record, assignee=assignee)
 
@@ -278,5 +340,33 @@ def update_failure_task(
         metadata={"status": task.status, "assignee_employee_id": task.assignee_employee_id, "priority": task.priority},
     )
     db.flush()
+    _sync_governance_task(
+        db,
+        organization_id=organization_id,
+        test_node_id=task.test_node_id,
+        test_name=task.title.replace("Investigate failing test: ", "", 1),
+        title=task.title,
+        description=(task.description or record.notes) if record is not None else task.description,
+        priority=task.priority,
+        actor_employee_id=actor_employee_id,
+        actor_user_id=actor_user_id,
+        assignee_employee_id=task.assignee_employee_id,
+        latest_failed_run_id=task.latest_failed_run_id,
+        latest_failed_result_id=task.latest_failed_result_id,
+    )
     assignee = db.query(Employee).filter(Employee.id == task.assignee_employee_id).first() if task.assignee_employee_id else None
     return serialize_failure_task(task, record=record, assignee=assignee)
+
+
+class TestFailureTaskService:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def get_failure_task_for_test(self, organization_id: int, test_node_id: str) -> dict | None:
+        return get_failure_task_for_test(self.db, organization_id=organization_id, test_node_id=test_node_id)
+
+    def ensure_failure_task_for_test(self, organization_id: int, test_node_id: str) -> dict | None:
+        return ensure_failure_task_for_test(self.db, organization_id=organization_id, test_node_id=test_node_id)
+
+    def sync_governance_task(self, **kwargs) -> None:
+        _sync_governance_task(self.db, **kwargs)

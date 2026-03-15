@@ -781,7 +781,8 @@ def test_inventory_renders_same_file_tests_and_same_name_different_files_separat
     assert len(test_node_ids) == 3
 
 
-def test_test_dashboard_seeds_current_organization_when_no_runs_exist():
+def test_test_dashboard_seeds_current_organization_when_no_runs_exist(monkeypatch):
+    monkeypatch.setenv("ENABLE_DEMO_WORKSPACE_SEEDING", "true")
     session = _session()
     _, _, employee = _seed_org(session)
 
@@ -798,7 +799,8 @@ def test_test_dashboard_seeds_current_organization_when_no_runs_exist():
     ).count() > 0
 
 
-def test_test_dashboard_backfills_missing_case_results_for_existing_runs():
+def test_test_dashboard_backfills_missing_case_results_for_existing_runs(monkeypatch):
+    monkeypatch.setenv("ENABLE_DEMO_WORKSPACE_SEEDING", "true")
     session = _session()
     company, _, employee = _seed_org(session)
 

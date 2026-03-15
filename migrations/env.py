@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from logging.config import fileConfig
 import os
+import sys
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
@@ -20,6 +23,7 @@ database_url = (os.getenv("DATABASE_URL") or "").strip()
 if database_url:
     config.set_main_option("sqlalchemy.url", database_url)
 
+print('sys.path:', sys.path)
 
 def run_migrations_offline() -> None:
     url = config.get_main_option("sqlalchemy.url")

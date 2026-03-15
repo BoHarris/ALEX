@@ -44,7 +44,17 @@ function RunHistoryCard({ item }) {
   );
 }
 
-export default function TestingRunHistoryDrawer({ open, test, employees, onClose, onCreateTask, onUpdateTask }) {
+export default function TestingRunHistoryDrawer({
+  open,
+  test,
+  employees,
+  onClose,
+  onCreateTask,
+  onUpdateTask,
+  onRunTest,
+  onViewLatestRun,
+  runPending = false,
+}) {
   const history = test?.history || [];
   const title = test?.test_name || "Execution History";
   const subtitle = test
@@ -98,6 +108,9 @@ export default function TestingRunHistoryDrawer({ open, test, employees, onClose
               employees={employees}
               onCreateTask={onCreateTask}
               onUpdateTask={onUpdateTask}
+              onRunTest={onRunTest}
+              onViewLatestRun={onViewLatestRun}
+              runPending={runPending}
               embedded
             />
           </div>

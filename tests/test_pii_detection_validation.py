@@ -96,6 +96,34 @@ def test_false_positive_prevention_keeps_product_id_out_of_pii_results():
     assert detections == []
 
 
+def test_detection_validation_suite_meets_precision_and_recall_thresholds():
+    cases = _load_validation_cases()
+    labeled_columns = []
+    labeled_columns.extend((column_name, values, True) for column_name, values in cases["pii_examples"].items())
+    labeled_columns.extend((column_name, values, False) for column_name, values in cases["non_pii_examples"].items())
+
+    true_positives = 0
+    false_positives = 0
+    false_negatives = 0
+
+    for column_name, values, expected_pii in labeled_columns:
+        frame = pd.DataFrame({column_name: values})
+        pii_columns, _ = _detect(frame)
+        predicted_pii = column_name in pii_columns
+        if expected_pii and predicted_pii:
+            true_positives += 1
+        elif expected_pii and not predicted_pii:
+            false_negatives += 1
+        elif not expected_pii and predicted_pii:
+            false_positives += 1
+
+    precision = true_positives / max(true_positives + false_positives, 1)
+    recall = true_positives / max(true_positives + false_negatives, 1)
+
+    assert precision >= 0.90
+    assert recall >= 0.85
+
+
 def test_detection_scores_are_reproducible_for_identical_input():
     cases = _load_validation_cases()
     frame = pd.DataFrame(
