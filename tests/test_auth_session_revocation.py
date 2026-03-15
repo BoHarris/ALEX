@@ -278,3 +278,28 @@ def test_refresh_requires_reauthentication_when_binding_changes():
     assert exc.value.status_code == 401
     assert exc.value.detail["error_code"] == "reauthentication_required"
     assert refresh_session.revoked is True
+
+
+def test_refresh_requires_reauthentication_when_expected_binding_is_missing():
+    session = _session()
+    user = _make_user(session, is_active=True)
+    refresh_cookie = issue_bound_refresh_token(
+        session,
+        user_id=user.id,
+        refresh_version=user.refresh_version,
+        context=extract_request_security_context(_request_with_headers({"x-device-fingerprint": "known-device"})),
+    )
+    session.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        refresh_access_token(
+            request=_request_with_headers({"user-agent": ""}),
+            response=Response(),
+            refresh_token=refresh_cookie,
+            db=session,
+        )
+
+    refresh_session = session.query(RefreshSession).first()
+    assert exc.value.status_code == 401
+    assert exc.value.detail["error_code"] == "reauthentication_required"
+    assert refresh_session.revoked is True

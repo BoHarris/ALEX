@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import tempfile
 import time
 import uuid
@@ -10,10 +11,11 @@ from mimetypes import guess_type
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, HTMLResponse, Response
-from pydantic import BaseModel
+from fastapi.responses import FileResponse
+import pandas as pd
+from pydantic import BaseModel, Field
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
@@ -21,11 +23,13 @@ from database.database import get_db
 from database.models.company_settings import CompanySettings
 from database.models.scan_results import ScanResult
 from dependencies.tier_guard import get_current_user_context
-from services.audit_report_service import generate_audit_report_html, render_report_pdf_from_html
 from services.audit_service import list_audit_events, record_audit_event, serialize_audit_event
+from services.scan_job_service import create_scan_job, enqueue_scan_job, process_scan_job, should_run_async
 from services.retention_service import apply_retention_state, apply_retention_state_bulk
-from services.scan_service import ScanContext, ScanLimitError, parse_scan_result_metadata, run_scan_pipeline
+from services.scan_service import ScanLimitError, parse_scan_result_metadata
 from services.security_service import extract_request_security_context, register_scan_activity
+from utils.report_cache import cache_html_report, cache_pdf_report
+from utils.security_events import record_security_event
 from utils.api_errors import error_payload
 from utils.constants import SUPPORTED_EXTENSIONS, SUPPORTED_EXTENSIONS_SORTED
 from utils.plan_features import get_plan_features
@@ -38,18 +42,120 @@ router = APIRouter(prefix="/scans", tags=["Scans"])
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 REDACTED_BASE_DIR = (BASE_DIR / "redacted").resolve()
+ARCHIVE_MAX_ENTRIES = max(1, int(os.getenv("SCAN_ARCHIVE_MAX_ENTRIES", "4000")))
+ARCHIVE_MAX_TOTAL_UNCOMPRESSED_BYTES = max(
+    1,
+    int(os.getenv("SCAN_ARCHIVE_MAX_UNCOMPRESSED_BYTES", str(100 * 1024 * 1024))),
+)
+ARCHIVE_MAX_ENTRY_BYTES = max(
+    1,
+    int(os.getenv("SCAN_ARCHIVE_MAX_ENTRY_BYTES", str(25 * 1024 * 1024))),
+)
+ARCHIVE_MAX_COMPRESSION_RATIO = max(
+    1.0,
+    float(os.getenv("SCAN_ARCHIVE_MAX_COMPRESSION_RATIO", "100.0")),
+)
+XML_UNSAFE_DIRECTIVE_RE = re.compile(br"<!DOCTYPE|<!ENTITY", re.IGNORECASE)
+SPREADSHEET_FORMULA_RE = re.compile(r"^\s*[=+\-@]")
 
 
 class ScanResultPayload(BaseModel):
-    scan_id: int
+    job_id: int | None = None
+    job_status: str | None = None
+    poll_url: str | None = None
+    scan_id: int | None = None
     filename: str
-    pii_columns: list[str]
-    redacted_file: str
-    risk_score: int
-    redacted_count: int
-    total_values: int
-    redaction_summary: dict[str, int]
-    detection_results: list[dict[str, object]]
+    pii_columns: list[str] = Field(default_factory=list)
+    redacted_file: str | None = None
+    risk_score: int | None = None
+    redacted_count: int | None = None
+    total_values: int | None = None
+    redaction_summary: dict[str, int] = Field(default_factory=dict)
+    detection_results: list[dict[str, object]] = Field(default_factory=list)
+
+
+def _scan_pipeline_filename(filename: str) -> str:
+    path = Path(filename)
+    if path.suffix.lower() == ".xls":
+        return f"{path.stem}.xlsx"
+    return filename
+
+
+def _validate_safe_archive(*, source_path: str) -> None:
+    try:
+        with zipfile.ZipFile(source_path) as archive:
+            entries = [entry for entry in archive.infolist() if not entry.is_dir()]
+    except zipfile.BadZipFile as exc:
+        raise ValueError("Archive is malformed or unsupported.") from exc
+
+    if not entries:
+        raise ValueError("Archive is malformed or unsupported.")
+    if len(entries) > ARCHIVE_MAX_ENTRIES:
+        raise ValueError("Compressed archive exceeds safe processing limits.")
+
+    total_uncompressed = 0
+    for entry in entries:
+        entry_path = Path(entry.filename)
+        file_size = max(int(entry.file_size or 0), 0)
+        compressed_size = max(int(entry.compress_size or 0), 0)
+
+        if entry_path.is_absolute() or ".." in entry_path.parts:
+            raise ValueError("Archive contains unsafe paths.")
+        if file_size > ARCHIVE_MAX_ENTRY_BYTES:
+            raise ValueError("Compressed archive exceeds safe processing limits.")
+
+        total_uncompressed += file_size
+        if total_uncompressed > ARCHIVE_MAX_TOTAL_UNCOMPRESSED_BYTES:
+            raise ValueError("Compressed archive exceeds safe processing limits.")
+
+        if compressed_size == 0 and file_size > 0:
+            raise ValueError("Compressed archive exceeds safe processing limits.")
+        if compressed_size and (file_size / compressed_size) > ARCHIVE_MAX_COMPRESSION_RATIO:
+            raise ValueError("Compressed archive exceeds safe processing limits.")
+
+
+def _validate_safe_xml_upload(*, source_path: str) -> None:
+    with open(source_path, "rb") as handle:
+        header = handle.read(8192)
+    if XML_UNSAFE_DIRECTIVE_RE.search(header):
+        raise ValueError("XML DTD and entity declarations are not allowed.")
+
+
+def _sanitize_spreadsheet_cell(value):
+    if value is None:
+        return value
+    if isinstance(value, float) and pd.isna(value):
+        return value
+    text = value if isinstance(value, str) else str(value)
+    if SPREADSHEET_FORMULA_RE.match(text):
+        return f"'{text}"
+    return value
+
+
+def _sanitize_dataframe_for_spreadsheet(frame: pd.DataFrame) -> pd.DataFrame:
+    return frame.apply(lambda column: column.map(_sanitize_spreadsheet_cell))
+
+
+def _sanitize_redacted_output_file(*, file_path: str) -> str:
+    path = Path(file_path)
+    ext = path.suffix.lower()
+    if ext not in {".csv", ".tsv", ".xlsx", ".xls"}:
+        return str(path)
+
+    if ext in {".csv", ".tsv"}:
+        separator = "\t" if ext == ".tsv" else ","
+        frame = pd.read_csv(path, dtype=str, keep_default_na=False, sep=separator)
+        sanitized = _sanitize_dataframe_for_spreadsheet(frame)
+        sanitized.to_csv(path, index=False, sep=separator)
+        return str(path)
+
+    frame = pd.read_excel(path, dtype=str).fillna("")
+    sanitized = _sanitize_dataframe_for_spreadsheet(frame)
+    output_path = path if ext == ".xlsx" else path.with_suffix(".xlsx")
+    sanitized.to_excel(output_path, index=False)
+    if output_path != path and path.exists():
+        path.unlink()
+    return str(output_path)
 
 
 def _is_text_payload(file_bytes: bytes) -> bool:
@@ -170,6 +276,24 @@ def _parse_detection_results(raw_value: str | None) -> list[dict[str, object]]:
     return detections
 
 
+def _build_scan_submission_from_job_payload(job_payload: dict) -> ScanResultPayload:
+    result_payload = job_payload.get("result") or {}
+    return ScanResultPayload(
+        job_id=job_payload.get("job_id"),
+        job_status=job_payload.get("status"),
+        poll_url=f"/scan-jobs/{job_payload['job_id']}" if job_payload.get("job_id") else None,
+        scan_id=result_payload.get("scan_id"),
+        filename=result_payload.get("filename") or job_payload.get("filename") or "unknown",
+        pii_columns=result_payload.get("pii_columns") or [],
+        redacted_file=result_payload.get("redacted_file"),
+        risk_score=result_payload.get("risk_score"),
+        redacted_count=result_payload.get("redacted_count"),
+        total_values=result_payload.get("total_values"),
+        redaction_summary=result_payload.get("redaction_summary") or {},
+        detection_results=result_payload.get("detection_results") or [],
+    )
+
+
 def _serialize_scan(scan: ScanResult, *, include_submitter: bool) -> dict:
     return {
         "scan_id": scan.id,
@@ -270,6 +394,8 @@ def _resolve_redacted_file_path(stored_path: str) -> Path:
 @router.post("", response_model=ScanResultPayload)
 async def create_scan(
     request: Request,
+    response: Response,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     user_info: dict = Depends(get_current_user_context),
     db: Session = Depends(get_db),
@@ -293,6 +419,7 @@ async def create_scan(
         )
 
     ext = os.path.splitext(file.filename)[1].lower()
+    pipeline_filename = _scan_pipeline_filename(file.filename)
     if ext not in SUPPORTED_EXTENSIONS:
         raise HTTPException(
             status_code=400,
@@ -335,10 +462,12 @@ async def create_scan(
 
     reserved_quota = False
     temp_path = None
+    handed_off_to_job_worker = False
+    scan_job = None
     request_context = extract_request_security_context(request)
     started_at = time.perf_counter()
     try:
-        temp_path, _, file_signature_sample = await _stream_upload_to_tempfile(
+        temp_path, total_size, file_signature_sample = await _stream_upload_to_tempfile(
             file,
             suffix=ext,
             max_file_size_bytes=max_file_size_bytes,
@@ -352,6 +481,10 @@ async def create_scan(
                     error_code="unsupported_file_type",
                 ),
             )
+        if ext in {".xlsx", ".docx"}:
+            _validate_safe_archive(source_path=temp_path)
+        if ext == ".xml":
+            _validate_safe_xml_upload(source_path=temp_path)
 
         record_audit_event(
             db,
@@ -392,21 +525,66 @@ async def create_scan(
                 detail=error_payload(detail="Rate limit exceeded", error_code="rate_limit_exceeded"),
             )
 
-        context = ScanContext(
-            user_id=int(user_id),
+        scan_job = create_scan_job(
+            db,
             company_id=user_info.get("company_id"),
-            tier=user_info.get("tier"),
+            user_id=int(user_id),
+            filename=file.filename,
+            file_type=ext.lstrip("."),
         )
-        result = await run_in_threadpool(
-            partial(
-                run_scan_pipeline,
+        job_context = {
+            "user_id": int(user_id),
+            "company_id": user_info.get("company_id"),
+            "tier": user_info.get("tier"),
+        }
+
+        if should_run_async(total_size):
+            enqueue_scan_job(
+                background_tasks,
+                job_id=scan_job.id,
                 source_path=temp_path,
-                filename=file.filename,
-                context=context,
-                model=getattr(request.app.state, "pii_model", None),
+                original_filename=file.filename,
+                pipeline_filename=pipeline_filename,
+                context_data=job_context,
                 aggressive=aggressive,
+                model=getattr(request.app.state, "pii_model", None),
+                cleanup_source=True,
+                sanitize_output_file=_sanitize_redacted_output_file,
+            )
+            handed_off_to_job_worker = True
+            response.status_code = 202
+            return ScanResultPayload(
+                job_id=scan_job.id,
+                job_status=scan_job.status,
+                poll_url=f"/scan-jobs/{scan_job.id}",
+                scan_id=None,
+                filename=file.filename,
+                pii_columns=[],
+                redacted_file=None,
+                risk_score=None,
+                redacted_count=None,
+                total_values=None,
+                redaction_summary={},
+                detection_results=[],
+            )
+
+        job_payload = await run_in_threadpool(
+            partial(
+                process_scan_job,
+                job_id=scan_job.id,
+                source_path=temp_path,
+                original_filename=file.filename,
+                pipeline_filename=pipeline_filename,
+                context_data=job_context,
+                aggressive=aggressive,
+                model=getattr(request.app.state, "pii_model", None),
+                cleanup_source=True,
+                sanitize_output_file=_sanitize_redacted_output_file,
+                db_session=db,
             )
         )
+        handed_off_to_job_worker = True
+        result_payload = job_payload.get("result") or {}
         record_audit_event(
             db,
             company_id=user_info.get("company_id"),
@@ -415,29 +593,19 @@ async def create_scan(
             event_category="scan",
             description="A scan completed successfully.",
             target_type="scan",
-            target_id=str(result.scan_id),
+            target_id=str(result_payload.get("scan_id")),
             request_context=request_context,
             event_metadata=_scan_event_metadata(
-                scan_id=result.scan_id,
-                filename=result.filename,
+                scan_id=result_payload.get("scan_id"),
+                filename=result_payload.get("filename") or file.filename,
                 file_type=ext.lstrip("."),
-                risk_score=result.risk_score,
-                redacted_count=result.redacted_count,
+                risk_score=result_payload.get("risk_score"),
+                redacted_count=result_payload.get("redacted_count"),
                 scan_duration_ms=round((time.perf_counter() - started_at) * 1000, 2),
             ),
         )
         db.commit()
-        return ScanResultPayload(
-            scan_id=result.scan_id,
-            filename=result.filename,
-            pii_columns=result.pii_columns,
-            redacted_file=f"/scans/{result.scan_id}/download",
-            risk_score=result.risk_score,
-            redacted_count=result.redacted_count,
-            total_values=result.total_values,
-            redaction_summary=result.redacted_type_counts,
-            detection_results=result.detection_results,
-        )
+        return _build_scan_submission_from_job_payload(job_payload)
     except ScanLimitError as exc:
         if reserved_quota:
             release_scan_quota_reservation(db, user_id)
@@ -459,6 +627,16 @@ async def create_scan(
                 error_code=exc.error_code,
                 scan_duration_ms=round((time.perf_counter() - started_at) * 1000, 2),
             ),
+        )
+        record_security_event(
+            db,
+            company_id=user_info.get("company_id"),
+            user_id=int(user_id),
+            event_type="FAILED_SCAN",
+            severity="medium",
+            description="A scan request exceeded configured processing limits.",
+            ip_address=getattr(request_context, "ip_address", None),
+            event_metadata={"filename": file.filename, "error_code": exc.error_code},
         )
         db.commit()
         raise HTTPException(
@@ -485,6 +663,16 @@ async def create_scan(
                 reason=str(exc),
                 scan_duration_ms=round((time.perf_counter() - started_at) * 1000, 2),
             ),
+        )
+        record_security_event(
+            db,
+            company_id=user_info.get("company_id"),
+            user_id=int(user_id),
+            event_type="FAILED_SCAN",
+            severity="medium",
+            description="A scan request failed validation.",
+            ip_address=getattr(request_context, "ip_address", None),
+            event_metadata={"filename": file.filename, "reason": str(exc)},
         )
         db.commit()
         raise HTTPException(
@@ -513,6 +701,16 @@ async def create_scan(
                 error_id=error_id,
                 scan_duration_ms=round((time.perf_counter() - started_at) * 1000, 2),
             ),
+        )
+        record_security_event(
+            db,
+            company_id=user_info.get("company_id"),
+            user_id=int(user_id),
+            event_type="FAILED_SCAN",
+            severity="high",
+            description="A scan request failed during processing.",
+            ip_address=getattr(request_context, "ip_address", None),
+            event_metadata={"filename": file.filename, "error_id": error_id},
         )
         db.commit()
         raise HTTPException(
@@ -550,6 +748,16 @@ async def create_scan(
                 scan_duration_ms=round((time.perf_counter() - started_at) * 1000, 2),
             ),
         )
+        record_security_event(
+            db,
+            company_id=user_info.get("company_id"),
+            user_id=int(user_id),
+            event_type="FAILED_SCAN",
+            severity="high",
+            description="A scan request failed unexpectedly.",
+            ip_address=getattr(request_context, "ip_address", None),
+            event_metadata={"filename": file.filename, "error_id": error_id},
+        )
         db.commit()
         raise HTTPException(
             status_code=500,
@@ -560,7 +768,7 @@ async def create_scan(
             ),
         ) from exc
     finally:
-        if temp_path and os.path.exists(temp_path):
+        if temp_path and os.path.exists(temp_path) and not handed_off_to_job_worker:
             os.remove(temp_path)
 
 
@@ -709,6 +917,7 @@ def download_redacted_file(
         )
 
     mime, _ = guess_type(str(path))
+    download_name = f"{Path(scan.filename).stem}_redacted{path.suffix}"
     record_audit_event(
         db,
         company_id=scan.company_id,
@@ -722,14 +931,7 @@ def download_redacted_file(
         event_metadata=_scan_event_metadata(scan_id=scan.id, filename=scan.filename, file_type=scan.file_type),
     )
     db.commit()
-    return FileResponse(str(path), media_type=mime or "application/octet-stream", filename=path.name)
-
-
-def _download_scan_report_html(scan: ScanResult) -> tuple[str, str]:
-    html = generate_audit_report_html(scan)
-    timestamp = scan.scanned_at.strftime("%Y%m%d_%H%M%S") if scan.scanned_at else "unknown_time"
-    report_name = f"{Path(scan.filename).stem}_audit_report_{timestamp}.html"
-    return html, quote(report_name)
+    return FileResponse(str(path), media_type=mime or "application/octet-stream", filename=download_name)
 
 
 @router.get("/{scan_id}/report")
@@ -750,7 +952,8 @@ def download_scan_report(
                 error_code="scan_expired",
             ),
         )
-    html, encoded_name = _download_scan_report_html(scan)
+    html_path = cache_html_report(db, scan)
+    encoded_name = quote(html_path.name)
     record_audit_event(
         db,
         company_id=scan.company_id,
@@ -769,9 +972,10 @@ def download_scan_report(
         ),
     )
     db.commit()
-    return HTMLResponse(
-        content=html,
-        status_code=200,
+    return FileResponse(
+        str(html_path),
+        media_type="text/html; charset=utf-8",
+        filename=html_path.name,
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"},
     )
 
@@ -804,18 +1008,15 @@ def download_scan_report_pdf(
                 error_code="scan_expired",
             ),
         )
-    html = generate_audit_report_html(scan)
     try:
-        pdf_bytes = render_report_pdf_from_html(html)
+        pdf_path = cache_pdf_report(db, scan)
     except RuntimeError as exc:
         raise HTTPException(
             status_code=501,
             detail=error_payload(detail=str(exc), error_code="report_generation_unavailable"),
         ) from exc
 
-    timestamp = scan.scanned_at.strftime("%Y%m%d_%H%M%S") if scan.scanned_at else "unknown_time"
-    report_name = f"{Path(scan.filename).stem}_audit_report_{timestamp}.pdf"
-    encoded_name = quote(report_name)
+    encoded_name = quote(pdf_path.name)
     record_audit_event(
         db,
         company_id=scan.company_id,
@@ -834,8 +1035,9 @@ def download_scan_report_pdf(
         ),
     )
     db.commit()
-    return Response(
-        content=pdf_bytes,
+    return FileResponse(
+        str(pdf_path),
         media_type="application/pdf",
+        filename=pdf_path.name,
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"},
     )

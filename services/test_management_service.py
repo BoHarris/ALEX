@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -9,6 +10,7 @@ from urllib.parse import quote, unquote
 from sqlalchemy.orm import Session
 
 from database.models.compliance_test_case_result import ComplianceTestCaseResult
+from database.models.compliance_test_failure_task import ComplianceTestFailureTask
 from database.models.compliance_test_run import ComplianceTestRun
 from services.test_failure_task_service import get_failure_task_for_test
 from services.test_discovery_service import (
@@ -34,6 +36,26 @@ SORT_KEYS = {
     "flakiness": lambda item: item["flake_rate"],
     "name": lambda item: item["test_name"].lower(),
 }
+
+
+ACTIVE_RUN_STATUSES = {"queued", "running"}
+RUN_TYPE_FULL_SUITE = "full_suite"
+
+
+def _parse_run_metadata(value: str | None) -> dict[str, object]:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _supports_pytest_execution(*, file_path: str | None = None, node_id: str | None = None) -> bool:
+    normalized_file_path = str(file_path or "").strip().lower()
+    normalized_node_id = str(node_id or "").strip().lower()
+    return normalized_file_path.endswith(".py") or ".py::" in normalized_node_id
 
 
 def encode_test_id(*, node_id: str | None = None, category: str | None = None, test_name: str, file_path: str | None = None) -> str:
@@ -72,15 +94,22 @@ def _coerce_datetime(value: datetime | None) -> datetime | None:
 
 
 def _history_row(case: ComplianceTestCaseResult, run: ComplianceTestRun) -> dict[str, object]:
-    finished_at = _coerce_datetime(case.last_run_at) or _coerce_datetime(run.run_at)
-    started_at = None
+    finished_at = _coerce_datetime(case.last_run_at) or _coerce_datetime(run.completed_at) or _coerce_datetime(run.run_at)
+    started_at = _coerce_datetime(run.started_at)
     file_path = normalize_test_file_path(case.file_name)
     test_node_id = build_test_node_id(test_name=case.name, file_path=file_path, category=run.category)
-    if finished_at is not None and case.duration_ms is not None:
+    if started_at is None and finished_at is not None and case.duration_ms is not None:
         started_at = finished_at - timedelta(milliseconds=max(case.duration_ms, 0))
     return {
         "result_id": case.id,
         "run_id": run.id,
+        "run_type": run.run_type,
+        "run_status": _normalize_status(run.status),
+        "trigger_source": run.trigger_source,
+        "execution_engine": run.execution_engine,
+        "return_code": run.return_code,
+        "failure_summary": run.failure_summary,
+        "metadata": _parse_run_metadata(run.metadata_json),
         "test_node_id": test_node_id,
         "test_name": case.name,
         "suite_name": run.suite_name,
@@ -90,6 +119,7 @@ def _history_row(case: ComplianceTestCaseResult, run: ComplianceTestRun) -> dict
         "duration_ms": case.duration_ms,
         "started_at": started_at.isoformat() if started_at else None,
         "finished_at": finished_at.isoformat() if finished_at else None,
+        "completed_at": run.completed_at.isoformat() if run.completed_at else None,
         "last_run_timestamp": finished_at.isoformat() if finished_at else None,
         "expected_result": case.expected_result,
         "actual_result": case.actual_result,
@@ -101,6 +131,7 @@ def _history_row(case: ComplianceTestCaseResult, run: ComplianceTestRun) -> dict
         "file_name": file_path,
         "environment": case.dataset_name or run.dataset_name or "default",
         "build_version": None,
+        "execution_supported": _supports_pytest_execution(file_path=file_path, node_id=test_node_id),
     }
 
 
@@ -161,6 +192,7 @@ def _build_discovered_test_inventory_item(discovered_test: dict[str, str | None]
     node_id = str(discovered_test.get("node_id") or build_test_node_id(test_name=test_name, file_path=file_path))
     category = str(discovered_test.get("category") or infer_test_category(file_path, test_name))
     suite_name = Path(file_path).name if file_path else category
+    execution_supported = _supports_pytest_execution(file_path=file_path, node_id=node_id)
     return {
         "test_id": encode_test_id(node_id=node_id, test_name=test_name),
         "test_node_id": node_id,
@@ -189,6 +221,10 @@ def _build_discovered_test_inventory_item(discovered_test: dict[str, str | None]
         "last_successful_run": None,
         "last_failed_run": None,
         "latest_failure_reason": None,
+        "latest_run_id": None,
+        "latest_result_id": None,
+        "execution_supported": execution_supported,
+        "execution_engine": "pytest" if execution_supported else None,
         "current_pass_streak": 0,
         "current_fail_streak": 0,
         "trend": "not_run",
@@ -201,7 +237,7 @@ def _summarize_test_history(node_id: str, rows: list[tuple[ComplianceTestCaseRes
     ordered_rows = sorted(
         rows,
         key=lambda row: (
-            _coerce_datetime(row[0].last_run_at) or _coerce_datetime(row[1].run_at) or datetime.min.replace(tzinfo=timezone.utc),
+            _coerce_datetime(row[0].last_run_at) or _coerce_datetime(row[1].completed_at) or _coerce_datetime(row[1].run_at) or datetime.min.replace(tzinfo=timezone.utc),
             row[1].id,
             row[0].id,
         ),
@@ -210,6 +246,7 @@ def _summarize_test_history(node_id: str, rows: list[tuple[ComplianceTestCaseRes
     history = [_history_row(case, run) for case, run in ordered_rows]
     latest_case, latest_run = ordered_rows[0]
     file_path, _ = split_test_node_id(node_id)
+    effective_file_path = file_path or normalize_test_file_path(latest_case.file_name)
     statuses = [item["status"] for item in history]
     passed_runs = statuses.count("passed")
     failed_runs = statuses.count("failed")
@@ -230,21 +267,25 @@ def _summarize_test_history(node_id: str, rows: list[tuple[ComplianceTestCaseRes
         current_pass_streak=current_pass_streak,
         flaky=flaky,
     )
+    execution_supported = _supports_pytest_execution(file_path=effective_file_path, node_id=node_id)
 
     return {
         "test_id": encode_test_id(node_id=node_id, test_name=latest_case.name),
         "test_node_id": node_id,
         "test_name": latest_case.name,
-        "category": latest_run.category or infer_test_category(file_path, latest_case.name),
+        "category": latest_run.category or infer_test_category(effective_file_path, latest_case.name),
         "suite_name": latest_run.suite_name,
         "status": _normalize_status(latest_case.status),
         "description": latest_case.description,
-        "file_path": file_path or normalize_test_file_path(latest_case.file_name),
-        "file_name": file_path or normalize_test_file_path(latest_case.file_name),
+        "file_path": effective_file_path,
+        "file_name": effective_file_path,
         "expected_result": latest_case.expected_result,
         "actual_result": latest_case.actual_result,
         "confidence_score": float(latest_case.confidence_score) if latest_case.confidence_score is not None else None,
         "latest_environment": latest_case.dataset_name or latest_run.dataset_name or "default",
+        "latest_run_id": latest_run.id,
+        "latest_result_id": latest_case.id,
+        "latest_run_status": _normalize_status(latest_run.status),
         "total_runs": total_runs,
         "passed_runs": passed_runs,
         "failed_runs": failed_runs,
@@ -259,6 +300,8 @@ def _summarize_test_history(node_id: str, rows: list[tuple[ComplianceTestCaseRes
         "last_successful_run": last_successful_run,
         "last_failed_run": last_failed_run,
         "latest_failure_reason": latest_failure_reason,
+        "execution_supported": execution_supported,
+        "execution_engine": latest_run.execution_engine or ("pytest" if execution_supported else None),
         "current_pass_streak": current_pass_streak,
         "current_fail_streak": current_fail_streak,
         "trend": _compute_trend(history),
@@ -296,6 +339,8 @@ def _build_test_inventory(db: Session, *, organization_id: int) -> list[dict[str
         current["file_name"] = normalize_test_file_path(discovered_test.get("file_path"))
         if current.get("category") in {None, "", "integration tests"}:
             current["category"] = discovered_test["category"]
+        current["execution_supported"] = _supports_pytest_execution(file_path=current.get("file_path"), node_id=node_id)
+        current["execution_engine"] = "pytest" if current["execution_supported"] else None
     inventory = list(inventory_by_node_id.values())
     return sorted(
         inventory,
@@ -352,6 +397,39 @@ def get_test_management_dashboard(db: Session, *, organization_id: int) -> dict[
         for run in item["history"]
         if run["last_run_timestamp"] and _coerce_datetime(datetime.fromisoformat(str(run["last_run_timestamp"]))) >= recent_cutoff
     )
+    active_runs = (
+        db.query(ComplianceTestRun)
+        .filter(
+            ComplianceTestRun.organization_id == organization_id,
+            ComplianceTestRun.status.in_(tuple(ACTIVE_RUN_STATUSES)),
+        )
+        .order_by(ComplianceTestRun.run_at.desc(), ComplianceTestRun.id.desc())
+        .all()
+    )
+    recent_runs = (
+        db.query(ComplianceTestRun)
+        .filter(ComplianceTestRun.organization_id == organization_id)
+        .order_by(ComplianceTestRun.run_at.desc(), ComplianceTestRun.id.desc())
+        .limit(6)
+        .all()
+    )
+    last_full_suite_run = (
+        db.query(ComplianceTestRun)
+        .filter(
+            ComplianceTestRun.organization_id == organization_id,
+            ComplianceTestRun.run_type == RUN_TYPE_FULL_SUITE,
+        )
+        .order_by(ComplianceTestRun.run_at.desc(), ComplianceTestRun.id.desc())
+        .first()
+    )
+    open_failure_tasks = (
+        db.query(ComplianceTestFailureTask)
+        .filter(
+            ComplianceTestFailureTask.organization_id == organization_id,
+            ComplianceTestFailureTask.status.in_(("open", "in_progress")),
+        )
+        .count()
+    )
 
     return {
         "summary": {
@@ -362,8 +440,33 @@ def get_test_management_dashboard(db: Session, *, organization_id: int) -> dict[
             "not_run_tests": not_run_tests,
             "average_pass_rate": average_pass_rate,
             "total_executions_last_7_days": total_executions_last_7_days,
+            "running_runs": len(active_runs),
+            "open_failure_tasks": open_failure_tasks,
+            "last_full_suite_run": {
+                "id": last_full_suite_run.id,
+                "status": _normalize_status(last_full_suite_run.status),
+                "completed_at": last_full_suite_run.completed_at.isoformat() if last_full_suite_run and last_full_suite_run.completed_at else None,
+                "run_at": last_full_suite_run.run_at.isoformat() if last_full_suite_run and last_full_suite_run.run_at else None,
+            } if last_full_suite_run is not None else None,
         },
         "categories": category_rollups,
+        "recent_runs": [
+            {
+                "id": run.id,
+                "run_type": run.run_type,
+                "suite_name": run.suite_name,
+                "category": run.category,
+                "status": _normalize_status(run.status),
+                "pytest_node_id": run.pytest_node_id,
+                "started_at": run.started_at.isoformat() if run.started_at else None,
+                "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+                "run_at": run.run_at.isoformat() if run.run_at else None,
+                "return_code": run.return_code,
+                "failure_summary": run.failure_summary,
+                "metadata": _parse_run_metadata(run.metadata_json),
+            }
+            for run in recent_runs
+        ],
     }
 
 

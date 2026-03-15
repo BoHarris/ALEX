@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Card, CardContent } from "../components/card";
 import { Button } from "../components/button";
 import { Input } from "../components/input";
@@ -20,6 +20,73 @@ export default function PiiSentinelUI({ allowedTypes = FALLBACK_SUPPORTED_EXTENS
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState(null);
   const [hasScanned, setHasScanned] = useState(false);
+  const [jobId, setJobId] = useState(null);
+  const [jobStatus, setJobStatus] = useState(null);
+  const [onboarding, setOnboarding] = useState({ has_completed_onboarding: true, steps: {} });
+
+  useEffect(() => {
+    let cancelled = false;
+    authFetch("/onboarding/status")
+      .then(readResponseData)
+      .then(({ data }) => {
+        if (!cancelled && data) {
+          setOnboarding(data);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setOnboarding({ has_completed_onboarding: true, steps: {} });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!jobId || !jobStatus || jobStatus === "COMPLETED" || jobStatus === "FAILED") {
+      return undefined;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      try {
+        const res = await authFetch(`/scan-jobs/${jobId}`);
+        const { data, text } = await readResponseData(res);
+        if (!res.ok) {
+          throw new Error(getResponseMessage(data, `Server error: ${res.statusText}`, text));
+        }
+        if (cancelled || !data) {
+          return;
+        }
+        setJobStatus(data.status || null);
+        if (data.status === "COMPLETED" && data.result) {
+          setPiiColumns(data.result.pii_columns || []);
+          setRiskScore(data.result.risk_score ?? null);
+          setRedactedFile(data.result.redacted_file || null);
+          setScanId(data.result.scan_id || null);
+          setScannedFilename(data.result.filename || scannedFilename || file?.name || null);
+          setTotalValues(data.result.total_values ?? null);
+          setRedactedCount(data.result.redacted_count ?? null);
+          setRedactionSummary(data.result.redaction_summary || null);
+          setHasScanned(true);
+          setUploading(false);
+        }
+        if (data.status === "FAILED") {
+          setError(data.error_message || "Scan failed. Please try again.");
+          setUploading(false);
+        }
+      } catch (pollError) {
+        if (!cancelled) {
+          setError(pollError.message || "Unable to refresh scan status.");
+          setUploading(false);
+        }
+      }
+    }, 1000);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [file, jobId, jobStatus, scannedFilename]);
 
   const handleFileChange = (e) => {
     setFile(e.target.files[0]);
@@ -33,6 +100,8 @@ export default function PiiSentinelUI({ allowedTypes = FALLBACK_SUPPORTED_EXTENS
     setRedactionSummary(null);
     setError(null);
     setHasScanned(false);
+    setJobId(null);
+    setJobStatus(null);
   };
 
   const handleUpload = async () => {
@@ -56,6 +125,15 @@ export default function PiiSentinelUI({ allowedTypes = FALLBACK_SUPPORTED_EXTENS
         throw new Error("Unexpected response from server");
       }
 
+      if (data.job_id && !data.scan_id) {
+        setJobId(data.job_id);
+        setJobStatus(data.job_status || "QUEUED");
+        setScannedFilename(data.filename || file.name || null);
+        return;
+      }
+
+      setJobId(data.job_id || null);
+      setJobStatus(data.job_status || "COMPLETED");
       setPiiColumns(data.pii_columns || []);
       setRiskScore(data.risk_score ?? null);
       setRedactedFile(data.redacted_file || null);
@@ -107,9 +185,26 @@ export default function PiiSentinelUI({ allowedTypes = FALLBACK_SUPPORTED_EXTENS
       ? Object.entries(redactionSummary)
       : [];
 
+  const onboardingSteps = onboarding?.steps || {};
+  const uploadStepDone = Boolean(file) || Boolean(onboardingSteps.upload_first_file);
+  const runStepDone = hasScanned || Boolean(onboardingSteps.run_scan);
+  const reportStepDone = Boolean(onboarding?.has_completed_onboarding);
+
   return (
     <div className="mx-auto flex max-w-3xl flex-col items-center space-y-8 px-4 py-12">
       <h1 className="text-3xl font-bold text-app">ALEX Privacy Scan Dashboard</h1>
+
+      {!onboarding?.has_completed_onboarding && (
+        <Card className="w-full border border-sky-300/30 bg-sky-300/10 shadow-md">
+          <CardContent className="space-y-3 p-6">
+            <h2 className="text-xl font-bold text-app">Getting Started</h2>
+            <p className="text-sm text-app-secondary">Complete your first scan workflow to finish onboarding.</p>
+            <p className="text-sm text-app">{uploadStepDone ? "1. Upload first file - complete" : "1. Upload first file"}</p>
+            <p className="text-sm text-app">{runStepDone ? "2. Run scan - complete" : "2. Run scan"}</p>
+            <p className="text-sm text-app">{reportStepDone ? "3. View redaction report - complete" : "3. View redaction report"}</p>
+          </CardContent>
+        </Card>
+      )}
 
       <Card className="w-full shadow-md">
         <CardContent className="space-y-5 p-6">
@@ -139,7 +234,7 @@ export default function PiiSentinelUI({ allowedTypes = FALLBACK_SUPPORTED_EXTENS
 
             {uploading && (
               <p className="text-sm italic text-app-secondary" role="status" aria-live="polite">
-                Uploading and analyzing file...
+                {jobId && jobStatus ? `Scan job ${jobStatus.toLowerCase()}...` : "Uploading and analyzing file..."}
               </p>
             )}
 
@@ -258,6 +353,8 @@ export default function PiiSentinelUI({ allowedTypes = FALLBACK_SUPPORTED_EXTENS
                           `${stem}-audit-report.pdf`,
                           "pdf",
                         );
+                        await authFetch("/onboarding/complete", { method: "POST" });
+                        setOnboarding({ has_completed_onboarding: true, steps: onboardingSteps });
                         setError(null);
                       } catch (pdfError) {
                         if (pdfError?.status === 501) {
@@ -266,6 +363,8 @@ export default function PiiSentinelUI({ allowedTypes = FALLBACK_SUPPORTED_EXTENS
                               `/scans/${scanId}/report/html`,
                               `${stem}-audit-report.html`,
                             );
+                            await authFetch("/onboarding/complete", { method: "POST" });
+                            setOnboarding({ has_completed_onboarding: true, steps: onboardingSteps });
                             setError(
                               `${getDownloadErrorMessage(501)} Downloaded HTML audit report instead.`,
                             );

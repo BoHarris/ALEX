@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from routers import scans as scans_router
 from services import scan_service
 
 
@@ -80,3 +81,17 @@ def test_sanitize_xml_tag_normalizes_invalid_names():
     assert scan_service.sanitize_xml_tag("customer email") == "customer_email"
     assert scan_service.sanitize_xml_tag("123 customer email!") == "field_123_customer_email"
     assert scan_service.sanitize_xml_tag("$$$") == "field"
+
+
+def test_csv_output_sanitization_prefixes_spreadsheet_formulas():
+    base = _make_local_test_dir()
+    output_path = base / "redacted.csv"
+    output_path.write_text("value\n=1+1\n", encoding="utf-8")
+
+    try:
+        scans_router._sanitize_redacted_output_file(file_path=str(output_path))
+        frame = pd.read_csv(output_path, dtype=str, keep_default_na=False)
+
+        assert frame.iloc[0]["value"] == "'=1+1"
+    finally:
+        shutil.rmtree(base, ignore_errors=True)

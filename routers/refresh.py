@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Response, Cookie, Request
 from sqlalchemy.orm import Session
 from datetime import timedelta
+import logging
 import os
 
 from database.database import get_db
@@ -16,8 +17,10 @@ from services.security_service import extract_request_security_context, register
 from utils.auth_utils import create_access_token, decode_refresh_token_with_error, ensure_user_is_active, issue_refresh_token
 from utils.api_errors import error_payload
 from utils.rbac import normalize_role
+from utils.security_events import record_security_event
 
 router = APIRouter(prefix="/auth", tags=["Token"])
+logger = logging.getLogger(__name__)
 
 ACCESS_TOKEN_TTL = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15"))
 REFRESH_TOKEN_TTL_MIN = int(os.getenv("REFRESH_TOKEN_EXPIRE_MINUTES", "10080"))
@@ -36,6 +39,33 @@ def _parse_subject_as_int(subject: str | None) -> int:
             ),
         )
 
+
+def _clear_refresh_cookie(response: Response) -> None:
+    response.delete_cookie(
+        key="refresh_token",
+        httponly=True,
+        samesite="strict",
+        secure=IS_PROD,
+    )
+
+
+def _record_security_event_best_effort(db: Session, **kwargs) -> None:
+    try:
+        record_security_event(db, **kwargs)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.warning("Failed to persist refresh security event.", exc_info=True)
+
+
+def _record_audit_event_best_effort(db: Session, **kwargs) -> None:
+    try:
+        record_audit_event(db, **kwargs)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.warning("Failed to persist refresh audit event.", exc_info=True)
+
 @router.post("/refresh")
 def refresh_access_token(
     request: Request,
@@ -52,6 +82,7 @@ def refresh_access_token(
             context=extract_request_security_context(request),
         )
         db.commit()
+        _clear_refresh_cookie(response)
         raise HTTPException(
             status_code=401,
             detail=error_payload(
@@ -70,6 +101,7 @@ def refresh_access_token(
             context=extract_request_security_context(request),
         )
         db.commit()
+        _clear_refresh_cookie(response)
         error_code = "expired_token" if decode_error == "expired_token" else "invalid_token"
         detail = "Refresh token expired" if decode_error == "expired_token" else "Invalid refresh token"
         raise HTTPException(
@@ -80,6 +112,7 @@ def refresh_access_token(
     token_ver = payload.get("ver")
     refresh_jti = payload.get("jti")
     if token_ver is None:
+        _clear_refresh_cookie(response)
         raise HTTPException(
             status_code=401,
             detail=error_payload(
@@ -88,6 +121,7 @@ def refresh_access_token(
             ),
         )
     if not refresh_jti:
+        _clear_refresh_cookie(response)
         raise HTTPException(
             status_code=401,
             detail=error_payload(
@@ -106,6 +140,7 @@ def refresh_access_token(
             context=extract_request_security_context(request),
         )
         db.commit()
+        _clear_refresh_cookie(response)
         raise HTTPException(
             status_code=401,
             detail=error_payload(
@@ -126,12 +161,7 @@ def refresh_access_token(
         user.refresh_version = int(getattr(user, "refresh_version", 0)) + 1
         db.add(user)
         db.commit()
-        response.delete_cookie(
-            key="refresh_token",
-            httponly=True,
-            samesite="strict",
-            secure=IS_PROD,
-        )
+        _clear_refresh_cookie(response)
         ensure_user_is_active(user)
     
     #refresh token revocation check
@@ -144,7 +174,9 @@ def refresh_access_token(
             token_issue="refresh_version_mismatch",
             context=request_context,
         )
+        revoke_refresh_session(db, refresh_jti=refresh_jti)
         db.commit()
+        _clear_refresh_cookie(response)
         raise HTTPException(
             status_code=401,
             detail=error_payload(
@@ -158,23 +190,33 @@ def refresh_access_token(
         refresh_jti=refresh_jti,
         context=request_context,
     )
-    if not session_validation.ok:
+    effective_session_reason = session_validation.reason
+    if session_validation.ok and session_validation.session is not None:
+        stored_binding = (session_validation.session.session_binding_hash or "").strip()
+        current_binding = (request_context.session_binding_hash or "").strip()
+        if stored_binding and stored_binding != current_binding:
+            effective_session_reason = "binding_mismatch"
+    if not session_validation.ok or effective_session_reason is not None:
         register_token_issue(
             db,
             organization_id=user.company_id,
             user_id=user.id,
-            token_issue=f"refresh_session_{session_validation.reason}",
+            token_issue=f"refresh_session_{effective_session_reason}",
             context=request_context,
         )
-        if session_validation.reason == "binding_mismatch":
+        if effective_session_reason == "binding_mismatch":
             revoke_refresh_session_record(db, session=session_validation.session)
             db.commit()
-            response.delete_cookie(
-                key="refresh_token",
-                httponly=True,
-                samesite="strict",
-                secure=IS_PROD,
+            _record_security_event_best_effort(
+                db,
+                company_id=user.company_id,
+                user_id=user.id,
+                event_type="REFRESH_TOKEN_MISMATCH",
+                severity="high",
+                description="Refresh token binding mismatch detected.",
+                ip_address=request_context.ip_address,
             )
+            _clear_refresh_cookie(response)
             raise HTTPException(
                 status_code=401,
                 detail=error_payload(
@@ -183,6 +225,7 @@ def refresh_access_token(
                 ),
             )
         db.commit()
+        _clear_refresh_cookie(response)
         raise HTTPException(
             status_code=401,
             detail=error_payload(
@@ -224,7 +267,7 @@ def refresh_access_token(
         max_age=REFRESH_TOKEN_TTL_MIN * 60,
         secure=IS_PROD,
     )
-    record_audit_event(
+    _record_audit_event_best_effort(
         db,
         company_id=user.company_id,
         user_id=user.id,
@@ -236,6 +279,5 @@ def refresh_access_token(
         request_context=request_context,
         event_metadata={"refresh_version": user.refresh_version},
     )
-    db.commit()
     
     return {"access_token": new_access, "token_type": "bearer"}

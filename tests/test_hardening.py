@@ -3,6 +3,7 @@ import os
 import sys
 import shutil
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi import HTTPException
@@ -138,6 +139,49 @@ def test_auth_rate_limit_blocks_when_threshold_reached(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         webauthn_auth._enforce_auth_rate_limit(db=session, request=request, identifier="a@example.com")
     assert exc.value.status_code == 429
+
+
+def test_auth_rate_limit_purges_expired_counters_when_autoflush_disabled(monkeypatch):
+    if webauthn_auth is None:
+        pytest.skip("webauthn dependency is not installed in this test environment")
+    monkeypatch.setattr(webauthn_auth, "AUTH_RATE_WINDOW_SECONDS", 60)
+    monkeypatch.setattr(webauthn_auth, "AUTH_RATE_LIMIT_PER_IP", 1)
+    monkeypatch.setattr(webauthn_auth, "AUTH_RATE_LIMIT_PER_IDENTIFIER", 1)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine, tables=[SecurityState.__table__])
+    session = sessionmaker(bind=engine, autocommit=False, autoflush=False)()
+
+    session.add_all(
+        [
+            SecurityState(
+                namespace="security:auth_ratelimit:ip",
+                state_key="stale-ip",
+                counter_value=99,
+                expires_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+            ),
+            SecurityState(
+                namespace="security:auth_ratelimit:id",
+                state_key="stale-id",
+                counter_value=99,
+                expires_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+            ),
+        ]
+    )
+    session.commit()
+
+    class _Client:
+        host = "127.0.0.1"
+
+    class _Request:
+        client = _Client()
+        headers = {"user-agent": "pytest"}
+
+    webauthn_auth._enforce_auth_rate_limit(db=session, request=_Request(), identifier="a@example.com")
+    session.commit()
+
+    rows = session.query(SecurityState).order_by(SecurityState.namespace.asc()).all()
+    assert len(rows) == 2
+    assert all(row.counter_value == 1 for row in rows)
 
 
 def test_auth_rate_limit_returns_degraded_security_error_when_store_unavailable(monkeypatch):

@@ -6,6 +6,7 @@ const tabs = [
   { to: "/compliance/policies", label: "Policies" },
   { to: "/compliance/vendors", label: "Vendors" },
   { to: "/compliance/incidents", label: "Incidents" },
+  { to: "/compliance/tasks", label: "Tasks" },
   { to: "/compliance/risks", label: "Risks" },
   { to: "/compliance/access-reviews", label: "Access Reviews" },
   { to: "/compliance/training", label: "Training" },

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import DashboardFilesPanel from "../components/DashboardFilesPanel";
 import { Tabs, TabList, Tab, TabPanels, TabPanel } from "../components/Tabs";
 import { useCompanyUsers } from "../hooks/useCompanyUsers";
@@ -31,6 +32,14 @@ function formatDateTime(value) {
   if (!value) return "Unknown";
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? "Unknown" : parsed.toLocaleString();
+}
+
+function formatSecurityEventLabel(value) {
+  if (!value) return "Security alert";
+  return value
+    .split("_")
+    .join(" ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
 function PlanLockNotice({ title, message }) {
@@ -273,6 +282,7 @@ function ActivityPanel({ events, loading, error, onRetry, planFeatures }) {
 }
 
 function SecurityDashboardPanel({ securityHook }) {
+  const navigate = useNavigate();
   const { data, loading, error, reload } = securityHook;
   if (loading) {
     return <div className="surface-card p-6 text-sm text-app-secondary">Loading security dashboard...</div>;
@@ -299,9 +309,35 @@ function SecurityDashboardPanel({ securityHook }) {
         <div className="mt-4 space-y-3 text-sm text-app-secondary">
           {(data?.recent_security_alerts || []).length ? data.recent_security_alerts.map((alert) => (
             <div key={alert.id} className="rounded-2xl border border-app p-4">
-              <p className="font-semibold text-app">{alert.event_type}</p>
-              <p className="mt-1 text-app-secondary">{formatDateTime(alert.created_at)}</p>
-              <p className="mt-2 text-xs text-app-muted">{alert.metadata || "No metadata"}</p>
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="font-semibold text-app">{alert.event_label || formatSecurityEventLabel(alert.event_type)}</p>
+                  <p className="mt-1 text-app-secondary">{formatDateTime(alert.created_at)}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => navigate("/compliance/tasks")}
+                  className="rounded-full border border-cyan-300/40 bg-cyan-400/10 px-3 py-1 text-xs font-semibold text-cyan-100"
+                >
+                  Investigate
+                </button>
+              </div>
+              <p className="mt-2 text-sm text-app-secondary">{alert.description || "No alert description available."}</p>
+              <p className="mt-2 text-xs text-app-muted">
+                Recommended action: review session activity, linked incidents, and active access for the affected actor.
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {(alert.linked_tasks || []).length ? alert.linked_tasks.map((task) => (
+                  <button
+                    key={task.id}
+                    type="button"
+                    onClick={() => navigate("/compliance/tasks")}
+                    className="rounded-full border border-app px-3 py-1 text-xs font-semibold text-app-secondary hover:bg-white/5 hover:text-app"
+                  >
+                    {task.task_key} {task.status}
+                  </button>
+                )) : <span className="text-xs text-app-muted">No linked task yet.</span>}
+              </div>
             </div>
           )) : <p>No security alerts detected.</p>}
         </div>

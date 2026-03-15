@@ -16,6 +16,8 @@ class ScanResult(Base):
     redacted_type_counts = Column(String, nullable=True)
     total_pii_found = Column(Integer, nullable=False)
     redacted_file_path = Column(String, nullable=True)
+    report_html_path = Column(String, nullable=True)
+    report_pdf_path = Column(String, nullable=True)
     scanned_at = Column(DateTime, server_default=func.now(), nullable=False)
     status = Column(String, nullable=False, default="active", index=True)
     archived_at = Column(DateTime(timezone=True), nullable=True)

@@ -1,8 +1,12 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import LinkedTaskPill from "../tasks/LinkedTaskPill";
 import { formatDateTime, statusBadgeClass } from "../../../pages/compliance/utils";
 
 export default function TestFailureTaskPanel({ test, employees, onCreateTask, onUpdateTask }) {
+  const navigate = useNavigate();
   const task = test?.task || null;
+  const linkedTask = test?.linked_tasks?.[0] || null;
   const assignableEmployees = (employees || []).filter((employee) => employee.status !== "inactive");
   const [assigneeEmployeeId, setAssigneeEmployeeId] = useState(task?.assignee_employee_id ? String(task.assignee_employee_id) : "");
   const [priority, setPriority] = useState(task?.priority || "medium");
@@ -92,6 +96,13 @@ export default function TestFailureTaskPanel({ test, employees, onCreateTask, on
         </div>
       ) : null}
 
+      {linkedTask ? (
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <LinkedTaskPill label={`${linkedTask.task_key} ${linkedTask.status}`} onClick={() => navigate("/compliance/tasks")} tone="accent" />
+          <span className="text-xs text-app-muted">Linked into the shared governance task queue.</span>
+        </div>
+      ) : null}
+
       <div className="mt-4 grid gap-3 md:grid-cols-3">
         <label className="flex flex-col gap-2 text-sm text-app-secondary">
           <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-app-muted">Assignee</span>
@@ -137,14 +148,25 @@ export default function TestFailureTaskPanel({ test, employees, onCreateTask, on
 
       <div className="mt-4 flex justify-end">
         {task ? (
-          <button
-            type="button"
-            onClick={handleSaveTask}
-            disabled={saving}
-            className="rounded-full border border-cyan-300/40 bg-cyan-400/15 px-4 py-2 text-sm font-semibold text-cyan-200 transition hover:bg-cyan-400/20 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {saving ? "Saving..." : "Update task"}
-          </button>
+          <div className="flex flex-wrap gap-2">
+            {linkedTask ? (
+              <button
+                type="button"
+                onClick={() => navigate("/compliance/tasks")}
+                className="rounded-full border border-app px-4 py-2 text-sm font-semibold text-app-secondary transition hover:bg-white/5 hover:text-app"
+              >
+                View task
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={handleSaveTask}
+              disabled={saving}
+              className="rounded-full border border-cyan-300/40 bg-cyan-400/15 px-4 py-2 text-sm font-semibold text-cyan-200 transition hover:bg-cyan-400/20 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {saving ? "Saving..." : "Update task"}
+            </button>
+          </div>
         ) : (
           <button
             type="button"

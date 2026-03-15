@@ -3,7 +3,9 @@ import { useNavigate } from "react-router-dom";
 import { Button } from "./button";
 import { apiUrl } from "../utils/api";
 import { getResponseMessage, readResponseData } from "../utils/http";
-import { setAccessToken } from "../utils/tokenStore";
+import { completeLogin } from "../utils/sessionCoordinator";
+
+const DEFAULT_EMPLOYEE_EMAIL = process.env.REACT_APP_DEFAULT_EMPLOYEE_EMAIL?.trim() || "";
 
 function base64UrlToUint8Array(base64Url) {
   const padding = "=".repeat((4 - (base64Url.length % 4)) % 4);
@@ -72,7 +74,7 @@ function serializeAttestation(credential) {
 const STATUS_REQUEST_TIMEOUT_MS = 5000;
 
 export default function EmployeeLoginForm() {
-  const [email, setEmail] = useState("bo.harris@boharrisllc.internal");
+  const [email, setEmail] = useState(DEFAULT_EMPLOYEE_EMAIL);
   const [error, setError] = useState(null);
   const [message, setMessage] = useState(null);
   const [activeAction, setActiveAction] = useState(null);
@@ -155,7 +157,7 @@ export default function EmployeeLoginForm() {
     if (!verifyRes.ok) {
       throw new Error(getResponseMessage(data, "Employee login failed", text));
     }
-    setAccessToken(data.access_token);
+    completeLogin(data.access_token);
     navigate("/compliance");
   }
 
@@ -171,6 +173,7 @@ export default function EmployeeLoginForm() {
     if (!optionsRes.ok) {
       throw new Error(getResponseMessage(optionsData, "Failed to begin employee enrollment", optionsText));
     }
+    const stagedRegistrationId = optionsData?.user_id || null;
     const credential = await navigator.credentials.create({ publicKey: normalizeRegistrationOptions(optionsData.options) });
     if (!credential) {
       throw new Error("Employee passkey enrollment was not completed.");
@@ -179,7 +182,7 @@ export default function EmployeeLoginForm() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
-      body: JSON.stringify({ email: safeEmail, credential: serializeAttestation(credential) }),
+      body: JSON.stringify({ email: safeEmail, user_id: stagedRegistrationId, credential: serializeAttestation(credential) }),
     });
     const { data, text } = await readResponseData(verifyRes);
     if (!verifyRes.ok) {
@@ -243,9 +246,11 @@ export default function EmployeeLoginForm() {
       <p className="mt-3 text-center text-sm leading-relaxed text-app-secondary">
         Internal access for ALEX governance, risk, compliance, and security operations.
       </p>
-      <p className="mt-2 text-center text-xs text-app-muted">
-        Initial seeded employee account: <span className="font-semibold">{email}</span>
-      </p>
+      {DEFAULT_EMPLOYEE_EMAIL ? (
+        <p className="mt-2 text-center text-xs text-app-muted">
+          Suggested employee account: <span className="font-semibold">{DEFAULT_EMPLOYEE_EMAIL}</span>
+        </p>
+      ) : null}
       <p className="mt-3 text-center text-xs text-app-secondary" role="status">{renderStatusMessage()}</p>
       {error ? <p className="mt-4 text-center text-red-500" role="alert">{error}</p> : null}
       {message ? <p className="mt-4 text-center text-emerald-600" role="status">{message}</p> : null}

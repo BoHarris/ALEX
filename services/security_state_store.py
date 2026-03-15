@@ -30,6 +30,7 @@ def _normalize_datetime(value: datetime | None) -> datetime | None:
 
 def _purge_expired(db: Session, *, namespace: str) -> None:
     now = _utcnow()
+    removed_any = False
     expired_items = (
         db.query(SecurityState)
         .filter(SecurityState.namespace == namespace)
@@ -39,6 +40,9 @@ def _purge_expired(db: Session, *, namespace: str) -> None:
         expires_at = _normalize_datetime(item.expires_at)
         if expires_at and expires_at <= now:
             db.delete(item)
+            removed_any = True
+    if removed_any:
+        db.flush()
 
 
 def increment_counter(

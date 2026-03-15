@@ -1,12 +1,15 @@
+import { useState } from "react";
 import { Outlet } from "react-router-dom";
 import { Button } from "../../components/button";
 import ComplianceHeader from "../../components/compliance/ComplianceHeader";
 import ComplianceTabNav from "../../components/compliance/ComplianceTabNav";
+import CreateTaskModal from "../../components/compliance/tasks/CreateTaskModal";
 import { useComplianceWorkspace } from "../../hooks/useComplianceWorkspace";
 
 export default function ComplianceLayout() {
   const workspace = useComplianceWorkspace(true);
   const { data, loading, error } = workspace;
+  const [createTaskOpen, setCreateTaskOpen] = useState(false);
 
   if (loading) {
     return <div className="page-shell px-6 py-12 text-app">Loading compliance workspace...</div>;
@@ -32,9 +35,22 @@ export default function ComplianceLayout() {
           title="Internal Governance Platform"
           organizationName={organizationName}
           description="A route-backed compliance command center for policy governance, workforce controls, incident operations, risk tracking, training, testing evidence, and audit visibility."
-          actions={<Button onClick={workspace.reload}>Refresh data</Button>}
+          actions={(
+            <div className="flex flex-wrap gap-3">
+              <Button onClick={() => setCreateTaskOpen(true)}>Create Task</Button>
+              <Button onClick={workspace.reload}>Refresh data</Button>
+            </div>
+          )}
         />
         <ComplianceTabNav />
+        <CreateTaskModal
+          open={createTaskOpen}
+          onClose={() => setCreateTaskOpen(false)}
+          onSubmit={workspace.createTask}
+          employees={data?.directory?.employees || []}
+          title="Create Task"
+          subtitle="Open a manual governance task without leaving the current workflow."
+        />
         <Outlet context={workspace} />
       </div>
     </div>

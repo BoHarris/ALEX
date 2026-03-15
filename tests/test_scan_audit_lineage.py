@@ -15,6 +15,7 @@ from database.models.audit_event import AuditEvent
 from database.models.audit_log import AuditLog
 from database.models.company import Company
 from database.models.company_settings import CompanySettings
+from database.models.scan_job import ScanJob
 from database.models.scan_results import ScanResult
 from database.models.user import User
 from dependencies.tier_guard import get_current_user_context
@@ -53,6 +54,7 @@ def _session_factory():
             User.__table__,
             CompanySettings.__table__,
             ScanResult.__table__,
+            ScanJob.__table__,
             AuditEvent.__table__,
             AuditLog.__table__,
         ],
@@ -160,7 +162,14 @@ def test_downloads_record_audit_events_and_lineage_endpoint_returns_them(monkeyp
 
     monkeypatch.setattr(scans_router, "BASE_DIR", base)
     monkeypatch.setattr(scans_router, "REDACTED_BASE_DIR", redacted_dir.resolve())
-    monkeypatch.setattr(scans_router, "generate_audit_report_html", lambda scan: "<html><body>Audit report</body></html>")
+    def _cache_html_report(_db, _scan):
+        reports_dir = base / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        html_path = reports_dir / "audit-report.html"
+        html_path.write_text("<html><body>Audit report</body></html>", encoding="utf-8")
+        return html_path
+
+    monkeypatch.setattr(scans_router, "cache_html_report", _cache_html_report)
 
     download = client.get("/scans/17/download")
     report = client.get("/scans/17/report")

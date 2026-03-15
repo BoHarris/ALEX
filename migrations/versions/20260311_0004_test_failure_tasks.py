@@ -31,13 +31,26 @@ def upgrade() -> None:
             sa.Column("latest_failed_result_id", sa.Integer(), sa.ForeignKey("compliance_test_case_results.id"), nullable=False),
             sa.Column("title", sa.String(), nullable=False),
             sa.Column("description", sa.Text(), nullable=True),
-            sa.Column("status", sa.String(), nullable=False, server_default="open"),
-            sa.Column("priority", sa.String(), nullable=False, server_default="medium"),
+            sa.Column("status", sa.Enum("open", "in_progress", "closed", name="task_status_enum"), nullable=False, server_default="open"),
+            sa.Column("priority", sa.Enum("low", "medium", "high", "critical", name="task_priority_enum"), nullable=False, server_default="medium"),
             sa.Column("assignee_employee_id", sa.Integer(), sa.ForeignKey("employees.id"), nullable=True),
             sa.Column("failure_signature", sa.String(), nullable=True),
             sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
             sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+            sa.Column("closed_at", sa.DateTime(timezone=True), nullable=True),
+            sa.Column("team_id", sa.Integer(), sa.ForeignKey("teams.id"), nullable=True),
             sa.UniqueConstraint("compliance_record_id", name="uq_compliance_test_failure_tasks_record_id"),
+        )
+
+    if not inspector.has_table("compliance_task_history"):
+        op.create_table(
+            "compliance_task_history",
+            sa.Column("id", sa.Integer(), primary_key=True),
+            sa.Column("task_id", sa.Integer(), sa.ForeignKey("compliance_test_failure_tasks.id"), nullable=False),
+            sa.Column("changed_by", sa.Integer(), sa.ForeignKey("employees.id"), nullable=False),
+            sa.Column("change_type", sa.String(), nullable=False),
+            sa.Column("change_details", sa.Text(), nullable=True),
+            sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         )
 
     task_indexes = {index["name"] for index in inspector.get_indexes("compliance_test_failure_tasks")} if inspector.has_table("compliance_test_failure_tasks") else set()
@@ -58,8 +71,14 @@ def upgrade() -> None:
     if "ix_compliance_test_failure_tasks_failure_signature" not in task_indexes:
         op.create_index("ix_compliance_test_failure_tasks_failure_signature", "compliance_test_failure_tasks", ["failure_signature"], unique=False)
 
+    # Add full-text search indexes
+    op.create_index("ix_compliance_test_failure_tasks_title", "compliance_test_failure_tasks", ["title"], unique=False, postgresql_using="gin")
+    op.create_index("ix_compliance_test_failure_tasks_description", "compliance_test_failure_tasks", ["description"], unique=False, postgresql_using="gin")
+
 
 def downgrade() -> None:
+    op.drop_index("ix_compliance_test_failure_tasks_title", table_name="compliance_test_failure_tasks")
+    op.drop_index("ix_compliance_test_failure_tasks_description", table_name="compliance_test_failure_tasks")
     op.drop_index("ix_compliance_test_failure_tasks_failure_signature", table_name="compliance_test_failure_tasks")
     op.drop_index("ix_compliance_test_failure_tasks_latest_failed_result_id", table_name="compliance_test_failure_tasks")
     op.drop_index("ix_compliance_test_failure_tasks_latest_failed_run_id", table_name="compliance_test_failure_tasks")
@@ -68,4 +87,5 @@ def downgrade() -> None:
     op.drop_index("ix_compliance_test_failure_tasks_status", table_name="compliance_test_failure_tasks")
     op.drop_index("ix_compliance_test_failure_tasks_test_node_id", table_name="compliance_test_failure_tasks")
     op.drop_index("ix_compliance_test_failure_tasks_organization_id", table_name="compliance_test_failure_tasks")
+    op.drop_table("compliance_task_history")
     op.drop_table("compliance_test_failure_tasks")

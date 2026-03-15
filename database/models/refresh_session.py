@@ -11,6 +11,7 @@ class RefreshSession(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     refresh_jti_hash = Column(String, nullable=False, unique=True, index=True)
     session_binding_hash = Column(String, nullable=True)
+    device_info = Column(String, nullable=True)
     issued_ip_address = Column(String, nullable=True)
     last_seen_ip_address = Column(String, nullable=True)
     revoked = Column(Boolean, default=False, nullable=False, index=True)

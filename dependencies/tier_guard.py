@@ -1,7 +1,9 @@
 from fastapi import Depends, HTTPException, Request
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from database.database import get_db
+from database.models.organization_membership import OrganizationMembership
 from database.models.user import User
 from services.security_service import extract_request_security_context, register_token_issue
 from utils.auth_utils import decode_token_with_error, ensure_user_is_active
@@ -69,10 +71,58 @@ def _serialize_user_context(user: User) -> dict:
     }
 
 
+def _resolve_membership(db: Session, user: User) -> OrganizationMembership | None:
+    if user.company_id is None:
+        return None
+    try:
+        return (
+            db.query(OrganizationMembership)
+            .filter(
+                OrganizationMembership.company_id == user.company_id,
+                OrganizationMembership.user_id == user.id,
+            )
+            .first()
+        )
+    except SQLAlchemyError:
+        db.rollback()
+        return None
+
+
 def get_current_user_context(
     request: Request,
     db: Session = Depends(get_db),
 ) -> dict:
+    api_key_context = getattr(request.state, "api_key_context", None)
+    if api_key_context:
+        user = db.query(User).filter(User.id == int(api_key_context["user_id"])).first()
+        if not user:
+            raise HTTPException(
+                status_code=401,
+                detail=error_payload(
+                    detail="Invalid API key",
+                    error_code="invalid_token",
+                ),
+            )
+        ensure_user_is_active(user)
+        membership = _resolve_membership(db, user)
+        if membership and membership.status != "ACTIVE":
+            raise HTTPException(
+                status_code=403,
+                detail=error_payload(
+                    detail="Organization membership is not active",
+                    error_code="forbidden",
+                ),
+            )
+        request.state.user_id = user.id
+        payload = _serialize_user_context(user)
+        if membership:
+            payload["role"] = normalize_role(membership.role)
+            payload["stored_role"] = membership.role
+            payload["membership_status"] = membership.status
+        payload["auth_type"] = "api_key"
+        payload["api_key_id"] = api_key_context["api_key_id"]
+        return payload
+
     token = _extract_bearer_token(request)
     payload, decode_error = decode_token_with_error(token)
     if not payload:
@@ -120,8 +170,22 @@ def get_current_user_context(
         )
         db.commit()
         ensure_user_is_active(user)
+    membership = _resolve_membership(db, user)
+    if membership and membership.status != "ACTIVE":
+        raise HTTPException(
+            status_code=403,
+            detail=error_payload(
+                detail="Organization membership is not active",
+                error_code="forbidden",
+            ),
+        )
     request.state.user_id = user.id
-    return _serialize_user_context(user)
+    context_payload = _serialize_user_context(user)
+    if membership:
+        context_payload["role"] = normalize_role(membership.role)
+        context_payload["stored_role"] = membership.role
+        context_payload["membership_status"] = membership.status
+    return context_payload
 
 
 def enforce_tier_limit(

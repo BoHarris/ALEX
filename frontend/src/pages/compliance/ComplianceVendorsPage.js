@@ -1,7 +1,9 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Button } from "../../components/button";
 import DetailDrawer from "../../components/compliance/DetailDrawer";
 import RecordTable from "../../components/compliance/RecordTable";
+import LinkedTaskPill from "../../components/compliance/tasks/LinkedTaskPill";
 import WorkspaceEmptyState from "../../components/compliance/WorkspaceEmptyState";
 import { useCompliancePageContext } from "./useCompliancePageContext";
 import { formatDate, formatDateTime, statusTone } from "./utils";
@@ -9,6 +11,7 @@ import { formatDate, formatDateTime, statusTone } from "./utils";
 const initialVendor = { title: "", vendor_name: "", service_category: "", data_access_level: "restricted", risk_rating: "medium", security_review_status: "pending", notes: "" };
 
 export default function ComplianceVendorsPage() {
+  const navigate = useNavigate();
   const workspace = useCompliancePageContext();
   const vendors = workspace.data?.vendors?.vendors || [];
   const [search, setSearch] = useState("");
@@ -63,6 +66,19 @@ export default function ComplianceVendorsPage() {
     }
   }
 
+  async function startVendorReviewTask() {
+    if (!selectedVendor) {
+      return;
+    }
+    setError(null);
+    try {
+      await workspace.createTaskFromVendor(selectedVendor.vendor.id, {});
+      navigate("/compliance/tasks");
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
   const timeline = selectedVendor ? workspace.timelineCache[selectedVendor.record.id]?.timeline : null;
   const columns = [
     { key: "vendor_name", label: "Vendor Name", render: (row) => <span className="font-semibold text-app">{row.vendor.vendor_name}</span> },
@@ -70,6 +86,7 @@ export default function ComplianceVendorsPage() {
     { key: "data_access_level", label: "Data Access", render: (row) => row.vendor.data_access_level },
     { key: "risk_rating", label: "Risk Rating", render: (row) => <span className={statusTone(row.vendor.risk_rating)}>{row.vendor.risk_rating || "unrated"}</span> },
     { key: "security_review_status", label: "Review Status", render: (row) => row.vendor.security_review_status },
+    { key: "tasks", label: "Tasks", render: (row) => row.linked_tasks?.length || 0 },
     { key: "contract_end_date", label: "Contract End", render: (row) => formatDate(row.vendor.contract_end_date) },
     { key: "last_review_date", label: "Last Review", render: (row) => formatDate(row.vendor.last_review_date) },
   ];
@@ -126,8 +143,17 @@ export default function ComplianceVendorsPage() {
                 <Button onClick={() => updateVendor({ security_review_status: "approved" })}>Approve</Button>
                 <Button onClick={() => updateVendor({ security_review_status: "needs follow-up" })}>Needs Follow-up</Button>
                 <Button onClick={() => updateVendor({ status: selectedVendor.record.status === "archived" ? "active" : "archived" })}>{selectedVendor.record.status === "archived" ? "Restore" : "Archive"}</Button>
+                <Button onClick={startVendorReviewTask}>Start review task</Button>
               </div>
               <p className="mt-4 text-sm text-app-secondary">{selectedVendor.record.notes || "No review notes recorded."}</p>
+            </section>
+            <section className="surface-card rounded-3xl p-5">
+              <h3 className="text-lg font-semibold text-app">Linked Tasks</h3>
+              <div className="mt-4 flex flex-wrap gap-2">
+                {selectedVendor.linked_tasks?.length ? selectedVendor.linked_tasks.map((task) => (
+                  <LinkedTaskPill key={task.id} label={`${task.task_key} ${task.status}`} onClick={() => navigate("/compliance/tasks")} tone="accent" />
+                )) : <p className="text-sm text-app-muted">No vendor workflow tasks linked yet.</p>}
+              </div>
             </section>
             <section className="surface-card rounded-3xl p-5">
               <h3 className="text-lg font-semibold text-app">Linked Documents</h3>
