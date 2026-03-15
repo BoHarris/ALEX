@@ -11,6 +11,12 @@ from sqlalchemy.orm import Session
 
 from database.models.employee import Employee
 from database.models.governance_task import GovernanceTask
+from services.automated_changes_execution_service import (
+    complete_automation_execution,
+    fail_automation_execution,
+    start_automation_execution,
+    update_automation_execution_metadata,
+)
 from services.governance_task_service import (
     CLOSED_TASK_STATUSES,
     OPEN_TASK_STATUSES,
@@ -498,40 +504,12 @@ def start_automation_task(
     task_id: int,
     actor_user_id: int | None,
 ) -> dict[str, Any]:
-    task = _require_automation_backlog_task(db, company_id, task_id)
-    _ensure_eligible(task)
-    _ensure_automation_can_start(db, company_id, task.id)
-    detail = update_task(
+    return start_automation_execution(
         db,
         company_id=company_id,
-        task_id=task.id,
-        actor_employee_id=None,
+        task_id=task_id,
         actor_user_id=actor_user_id,
-        assignee_employee_id=None,
-        assignee_type=AUTOMATION_ASSIGNEE_TYPE,
-        assignee_label=AUTOMATION_ASSIGNEE_LABEL,
-        status="in_progress",
-        metadata={
-            "owner_type": AUTOMATION_ASSIGNEE_TYPE,
-            "execution_mode": "governed_automation",
-            "automation_source": "backlog",
-            "review_state": "in_progress",
-        },
-        activity_actor_type=AUTOMATION_ASSIGNEE_TYPE,
-        activity_actor_label=AUTOMATION_ASSIGNEE_LABEL,
     )
-    add_task_activity(
-        db,
-        task_id=task.id,
-        company_id=company_id,
-        actor_employee_id=None,
-        actor_type=AUTOMATION_ASSIGNEE_TYPE,
-        actor_label=AUTOMATION_ASSIGNEE_LABEL,
-        action="automation_started",
-        details="Automated Changes started implementation work.",
-    )
-    db.flush()
-    return get_task_detail(db, company_id=company_id, task_id=task.id) if detail is not None else None
 
 
 def start_next_automation_task(
@@ -571,35 +549,14 @@ def block_automation_task(
     actor_user_id: int | None,
     reason: str | None = None,
 ) -> dict[str, Any]:
-    task = _require_automation_backlog_task(db, company_id, task_id)
-    detail = update_task(
+    return fail_automation_execution(
         db,
         company_id=company_id,
-        task_id=task.id,
-        actor_employee_id=None,
+        task_id=task_id,
         actor_user_id=actor_user_id,
-        status="blocked",
-        metadata={
-            "owner_type": AUTOMATION_ASSIGNEE_TYPE,
-            "execution_mode": "governed_automation",
-            "review_state": "blocked",
-            "blocked_reason": reason,
-        },
-        activity_actor_type=AUTOMATION_ASSIGNEE_TYPE,
-        activity_actor_label=AUTOMATION_ASSIGNEE_LABEL,
+        next_status="blocked",
+        error_summary=reason,
     )
-    add_task_activity(
-        db,
-        task_id=task.id,
-        company_id=company_id,
-        actor_employee_id=None,
-        actor_type=AUTOMATION_ASSIGNEE_TYPE,
-        actor_label=AUTOMATION_ASSIGNEE_LABEL,
-        action="automation_blocked",
-        details=reason or "Automated Changes marked the task as blocked.",
-    )
-    db.flush()
-    return get_task_detail(db, company_id=company_id, task_id=task.id) if detail is not None else None
 
 
 def mark_task_ready_for_review(
@@ -612,43 +569,20 @@ def mark_task_ready_for_review(
     commit_message: str | None = None,
     implementation_summary: str | None = None,
     review_notes: str | None = None,
+    execution_notes: str | None = None,
 ) -> dict[str, Any]:
-    task = _require_automation_backlog_task(db, company_id, task_id)
-    detail = update_task(
+    return complete_automation_execution(
         db,
         company_id=company_id,
-        task_id=task.id,
-        actor_employee_id=None,
+        task_id=task_id,
         actor_user_id=actor_user_id,
-        assignee_employee_id=None,
-        assignee_type=AUTOMATION_ASSIGNEE_TYPE,
-        assignee_label=AUTOMATION_ASSIGNEE_LABEL,
-        status="ready_for_review",
-        metadata={
-            "owner_type": AUTOMATION_ASSIGNEE_TYPE,
-            "execution_mode": "governed_automation",
-            "automation_source": "backlog",
-            "review_state": "pending_review",
-            "branch_name": branch_name,
-            "commit_message": commit_message,
-            "implementation_summary": implementation_summary,
-            "review_notes": review_notes,
-        },
-        activity_actor_type=AUTOMATION_ASSIGNEE_TYPE,
-        activity_actor_label=AUTOMATION_ASSIGNEE_LABEL,
+        target_status="ready_for_review",
+        branch_name=branch_name,
+        commit_message=commit_message,
+        implementation_summary=implementation_summary,
+        review_notes=review_notes,
+        execution_notes=execution_notes,
     )
-    add_task_activity(
-        db,
-        task_id=task.id,
-        company_id=company_id,
-        actor_employee_id=None,
-        actor_type=AUTOMATION_ASSIGNEE_TYPE,
-        actor_label=AUTOMATION_ASSIGNEE_LABEL,
-        action="automation_ready_for_review",
-        details=implementation_summary or "Implementation completed and moved to ready for review.",
-    )
-    db.flush()
-    return get_task_detail(db, company_id=company_id, task_id=task.id) if detail is not None else None
 
 
 def return_task_to_backlog(
@@ -701,31 +635,19 @@ def update_automation_task_metadata(
     commit_message: str | None = None,
     implementation_summary: str | None = None,
     review_notes: str | None = None,
+    execution_notes: str | None = None,
+    error_summary: str | None = None,
 ) -> dict[str, Any]:
-    task = _require_automation_backlog_task(db, company_id, task_id)
-    metadata = {
-        "branch_name": branch_name,
-        "commit_message": commit_message,
-        "implementation_summary": implementation_summary,
-        "review_notes": review_notes,
-    }
-    detail = update_task(
+    return update_automation_execution_metadata(
         db,
         company_id=company_id,
-        task_id=task.id,
+        task_id=task_id,
         actor_employee_id=actor_employee_id,
         actor_user_id=actor_user_id,
-        metadata={key: value for key, value in metadata.items() if value is not None},
+        branch_name=branch_name,
+        commit_message=commit_message,
+        implementation_summary=implementation_summary,
+        review_notes=review_notes,
+        execution_notes=execution_notes,
+        error_summary=error_summary,
     )
-    changed_fields = [label for label, value in (("branch", branch_name), ("commit message", commit_message), ("implementation summary", implementation_summary), ("review notes", review_notes)) if value is not None]
-    if changed_fields:
-        add_task_activity(
-            db,
-            task_id=task.id,
-            company_id=company_id,
-            actor_employee_id=actor_employee_id,
-            action="automation_metadata_updated",
-            details="Updated " + ", ".join(changed_fields) + ".",
-        )
-    db.flush()
-    return get_task_detail(db, company_id=company_id, task_id=task.id) if detail is not None else None

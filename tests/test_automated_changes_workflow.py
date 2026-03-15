@@ -196,6 +196,7 @@ def test_automation_workflow_enforces_one_active_task_and_ready_for_review(monke
             commit_message="feat: improve task filter clarity",
             implementation_summary="Updated the filter controls and added clearer queue labels.",
             review_notes="Verify the segmented controls on desktop and mobile.",
+            execution_notes="Validated the automation-ready workflow after updating the queue labels.",
         ),
         current_employee=context,
         db=session,
@@ -204,6 +205,9 @@ def test_automation_workflow_enforces_one_active_task_and_ready_for_review(monke
     assert ready["task"]["status"] == "ready_for_review"
     assert ready["task"]["workflow"]["review_state"] == "pending_review"
     assert ready["task"]["metadata"]["branch_name"] == "improvement/alex-imp-001-task-filter-clarity"
+    assert ready["task"]["metadata"]["automation_status"] == "succeeded"
+    assert ready["task"]["metadata"]["automation_result"] == "ready_for_review"
+    assert ready["task"]["metadata"]["execution_notes"] == "Validated the automation-ready workflow after updating the queue labels."
     assert any(entry["action"] == "automation_ready_for_review" for entry in ready["task"]["activity"])
 
 
@@ -222,3 +226,86 @@ def test_automation_routes_respect_company_scoping(monkeypatch, backlog_tmp_dir)
     with pytest.raises(HTTPException) as exc:
         compliance_router.assign_backlog_task_to_automation(task_id, current_employee=other_context, db=session)
     assert exc.value.status_code == 404
+
+
+def test_automation_execution_can_complete_task_to_done(monkeypatch, backlog_tmp_dir):
+    session = _session()
+    _, _, employee = _seed_org(session)
+    context = _employee_context(employee)
+    backlog_path = _write_backlog(backlog_tmp_dir)
+    monkeypatch.setattr(automated_changes_service, "DEFAULT_BACKLOG_PATH", backlog_path)
+
+    compliance_router.sync_automation_backlog(current_employee=context, db=session)
+    started = compliance_router.start_next_automation_work(current_employee=context, db=session)
+
+    completed = compliance_router.complete_automation_work(
+        started["task"]["id"],
+        compliance_router.AutomationMetadataRequest(
+            branch_name="improvement/alex-imp-001-task-filter-clarity",
+            commit_message="feat: improve task filter clarity",
+            implementation_summary="Completed the task filter polish and validated the queue behavior.",
+            review_notes="Spot-check the filter toggles in the governance workspace.",
+            execution_notes="Updated the segmented controls and rechecked the task detail drawer state.",
+        ),
+        current_employee=context,
+        db=session,
+    )
+
+    assert completed["task"]["status"] == "done"
+    assert completed["task"]["resolved_at"] is not None
+    assert completed["task"]["workflow"]["review_state"] == "completed"
+    assert completed["task"]["metadata"]["automation_status"] == "succeeded"
+    assert completed["task"]["metadata"]["automation_result"] == "done"
+    assert completed["task"]["metadata"]["branch_name"] == "improvement/alex-imp-001-task-filter-clarity"
+    assert completed["task"]["metadata"]["execution_notes"] == "Updated the segmented controls and rechecked the task detail drawer state."
+    assert completed["task"]["metadata"]["automation_completed_at"] is not None
+    assert any(entry["action"] == "automation_completed" for entry in completed["task"]["activity"])
+
+
+def test_automation_execution_failure_blocks_task_and_records_error(monkeypatch, backlog_tmp_dir):
+    session = _session()
+    _, _, employee = _seed_org(session)
+    context = _employee_context(employee)
+    backlog_path = _write_backlog(backlog_tmp_dir)
+    monkeypatch.setattr(automated_changes_service, "DEFAULT_BACKLOG_PATH", backlog_path)
+
+    compliance_router.sync_automation_backlog(current_employee=context, db=session)
+    started = compliance_router.start_next_automation_work(current_employee=context, db=session)
+
+    failed = compliance_router.fail_automation_work(
+        started["task"]["id"],
+        compliance_router.AutomationFailureRequest(
+            next_status="blocked",
+            branch_name="improvement/alex-imp-001-task-filter-clarity",
+            commit_message="feat: improve task filter clarity",
+            implementation_summary="Execution stopped while updating the shared filter component.",
+            execution_notes="The task detail drawer wiring succeeded before the blocker surfaced.",
+            error_summary="The shared filter component needs a dependency update before automation can finish.",
+        ),
+        current_employee=context,
+        db=session,
+    )
+
+    assert failed["task"]["status"] == "blocked"
+    assert failed["task"]["resolved_at"] is None
+    assert failed["task"]["workflow"]["review_state"] == "blocked"
+    assert failed["task"]["metadata"]["automation_status"] == "failed"
+    assert failed["task"]["metadata"]["automation_result"] == "blocked"
+    assert failed["task"]["metadata"]["error_summary"] == "The shared filter component needs a dependency update before automation can finish."
+    assert any(entry["action"] == "automation_failed" for entry in failed["task"]["activity"])
+
+
+def test_ineligible_backlog_item_is_rejected_for_automation(monkeypatch, backlog_tmp_dir):
+    session = _session()
+    _, _, employee = _seed_org(session)
+    context = _employee_context(employee)
+    backlog_path = _write_backlog(backlog_tmp_dir)
+    monkeypatch.setattr(automated_changes_service, "DEFAULT_BACKLOG_PATH", backlog_path)
+
+    compliance_router.sync_automation_backlog(current_employee=context, db=session)
+    ineligible = session.query(GovernanceTask).filter(GovernanceTask.source_id == "ALEX-IMP-003").first()
+
+    with pytest.raises(HTTPException) as exc:
+        compliance_router.assign_backlog_task_to_automation(ineligible.id, current_employee=context, db=session)
+
+    assert exc.value.status_code == 409

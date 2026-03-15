@@ -81,6 +81,11 @@ from services.automated_changes_service import (
     update_automation_task_metadata,
     return_task_to_backlog,
 )
+from services.automated_changes_execution_service import (
+    complete_automation_execution,
+    fail_automation_execution,
+    get_active_automation_task,
+)
 from services.test_failure_task_service import ensure_failure_task_for_test, get_failure_task_for_test, update_failure_task
 from services.test_discovery_service import build_test_node_id, normalize_test_file_path, split_test_node_id
 from services.test_execution_service import (
@@ -313,14 +318,20 @@ def _test_run_or_404(db: Session, run_id: int, organization_id: int) -> Complian
     return run
 
 
-def _serialize_test_run_result(db: Session, *, organization_id: int, case: ComplianceTestCaseResult, run: ComplianceTestRun) -> dict:
+def _serialize_test_run_result(db: Session, *, organization_id: int, case: ComplianceTestCaseResult, run: ComplianceTestRun, source_tasks_lookup: dict | None = None) -> dict:
     payload = _serialize_test_case(case, run)
-    payload["linked_tasks"] = list_source_tasks(
-        db,
-        company_id=organization_id,
-        source_type="test_failure",
-        source_id=payload["test_node_id"],
-    )
+    # Use pre-loaded source_tasks_lookup if available to avoid N+1 queries
+    if source_tasks_lookup is not None:
+        test_node_id = payload["test_node_id"]
+        payload["linked_tasks"] = source_tasks_lookup.get(test_node_id, [])
+    else:
+        # Fallback for individual calls (less efficient but maintains backwards compatibility)
+        payload["linked_tasks"] = list_source_tasks(
+            db,
+            company_id=organization_id,
+            source_type="test_failure",
+            source_id=payload["test_node_id"],
+        )
     return payload
 
 
@@ -807,11 +818,25 @@ class AutomationMetadataRequest(BaseModel):
     commit_message: str | None = None
     implementation_summary: str | None = None
     review_notes: str | None = None
+    execution_notes: str | None = None
+    error_summary: str | None = None
 
-    @field_validator("branch_name", "commit_message", "implementation_summary", "review_notes")
+    @field_validator("branch_name", "commit_message", "implementation_summary", "review_notes", "execution_notes", "error_summary")
     @classmethod
     def normalize_automation_text(cls, value: str | None) -> str | None:
         return _normalize_optional_text(value)
+
+
+class AutomationFailureRequest(AutomationMetadataRequest):
+    next_status: str = "blocked"
+
+    @field_validator("next_status")
+    @classmethod
+    def normalize_failure_status(cls, value: str) -> str:
+        normalized = _normalize_task_status(value, field_name="next status")
+        if normalized not in {"blocked", "todo"}:
+            raise ValueError("next status must be blocked or todo")
+        return normalized
 
 
 class AutomationBlockRequest(BaseModel):
@@ -1136,6 +1161,11 @@ def get_automation_queue(current_employee: dict = Depends(require_compliance_wor
     return list_automation_tasks(db, company_id=current_employee["organization_id"])
 
 
+@router.get("/automation/tasks/active")
+def get_active_automation_work(current_employee: dict = Depends(require_compliance_workspace_access), db: Session = Depends(get_db)):
+    return {"task": get_active_automation_task(db, company_id=current_employee["organization_id"])}
+
+
 @router.post("/automation/sync-backlog")
 def sync_automation_backlog(current_employee: dict = Depends(require_security_or_compliance_admin), db: Session = Depends(get_db)):
     try:
@@ -1231,6 +1261,54 @@ def mark_automation_work_ready_for_review(task_id: int, payload: AutomationMetad
             commit_message=payload.commit_message,
             implementation_summary=payload.implementation_summary,
             review_notes=payload.review_notes,
+            execution_notes=payload.execution_notes,
+        )
+    except ValueError as exc:
+        _raise_automation_error(exc)
+    if task is None:
+        raise HTTPException(status_code=404, detail=error_payload(detail="Task not found", error_code="not_found"))
+    db.commit()
+    return {"task": task}
+
+
+@router.post("/automation/tasks/{task_id}/complete")
+def complete_automation_work(task_id: int, payload: AutomationMetadataRequest, current_employee: dict = Depends(require_security_or_compliance_admin), db: Session = Depends(get_db)):
+    try:
+        task = complete_automation_execution(
+            db,
+            company_id=current_employee["organization_id"],
+            task_id=task_id,
+            actor_user_id=current_employee["user_id"],
+            target_status="done",
+            branch_name=payload.branch_name,
+            commit_message=payload.commit_message,
+            implementation_summary=payload.implementation_summary,
+            review_notes=payload.review_notes,
+            execution_notes=payload.execution_notes,
+        )
+    except ValueError as exc:
+        _raise_automation_error(exc)
+    if task is None:
+        raise HTTPException(status_code=404, detail=error_payload(detail="Task not found", error_code="not_found"))
+    db.commit()
+    return {"task": task}
+
+
+@router.post("/automation/tasks/{task_id}/fail")
+def fail_automation_work(task_id: int, payload: AutomationFailureRequest, current_employee: dict = Depends(require_security_or_compliance_admin), db: Session = Depends(get_db)):
+    try:
+        task = fail_automation_execution(
+            db,
+            company_id=current_employee["organization_id"],
+            task_id=task_id,
+            actor_user_id=current_employee["user_id"],
+            next_status=payload.next_status,
+            branch_name=payload.branch_name,
+            commit_message=payload.commit_message,
+            implementation_summary=payload.implementation_summary,
+            review_notes=payload.review_notes,
+            execution_notes=payload.execution_notes,
+            error_summary=payload.error_summary,
         )
     except ValueError as exc:
         _raise_automation_error(exc)
@@ -1272,6 +1350,8 @@ def patch_automation_task_metadata(task_id: int, payload: AutomationMetadataRequ
             commit_message=payload.commit_message,
             implementation_summary=payload.implementation_summary,
             review_notes=payload.review_notes,
+            execution_notes=payload.execution_notes,
+            error_summary=payload.error_summary,
         )
     except ValueError as exc:
         _raise_automation_error(exc)
@@ -2461,12 +2541,34 @@ def get_test_run_detail(run_id: int, current_employee: dict = Depends(require_co
         .order_by(ComplianceTestCaseResult.last_run_at.desc(), ComplianceTestCaseResult.id.desc())
         .all()
     )
+    
+    # Optimization: Pre-load all source tasks in one query instead of N+1 in serialize
+    test_node_ids = [result.name for result in results if result.name]
+    source_tasks_lookup: dict[str, list] = {}
+    if test_node_ids:
+        all_tasks = list_source_tasks(
+            db,
+            company_id=current_employee["organization_id"],
+            source_type="test_failure",
+            source_id_list=test_node_ids,  # Pass list for batch query
+        ) if hasattr(list_source_tasks, '__code__') and 'source_id_list' in list_source_tasks.__code__.co_varnames else []
+        # Fallback: group by source_id if list version not available
+        if not all_tasks:
+            source_tasks_lookup = {test_id: list_source_tasks(db, company_id=current_employee["organization_id"], source_type="test_failure", source_id=test_id) for test_id in test_node_ids}
+        else:
+            for task in all_tasks:
+                test_id = task.get('source_id')
+                if test_id not in source_tasks_lookup:
+                    source_tasks_lookup[test_id] = []
+                source_tasks_lookup[test_id].append(task)
+    
     serialized_results = [
         _serialize_test_run_result(
             db,
             organization_id=current_employee["organization_id"],
             case=result,
             run=run,
+            source_tasks_lookup=source_tasks_lookup if source_tasks_lookup else None,
         )
         for result in results
     ]

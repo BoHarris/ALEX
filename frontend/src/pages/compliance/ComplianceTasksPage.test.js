@@ -13,6 +13,8 @@ const mockSyncAutomationBacklog = jest.fn();
 const mockStartNextAutomationTask = jest.fn();
 const mockAssignTaskToAutomation = jest.fn();
 const mockStartAutomationTask = jest.fn();
+const mockCompleteAutomationTask = jest.fn();
+const mockFailAutomationTask = jest.fn();
 const mockBlockAutomationTask = jest.fn();
 const mockMarkAutomationTaskReadyForReview = jest.fn();
 const mockReturnAutomationTaskToBacklog = jest.fn();
@@ -122,6 +124,73 @@ const assignedAutomationTaskDetail = {
   workflow: { owner_type: "automation", execution_mode: "governed_automation", review_state: "queued", automation_source: "backlog" },
 };
 
+const runningAutomationTaskDetail = {
+  ...assignedAutomationTaskDetail,
+  status: "in_progress",
+  workflow: { owner_type: "automation", execution_mode: "governed_automation", review_state: "in_progress", automation_source: "backlog" },
+  metadata: {
+    ...assignedAutomationTaskDetail.metadata,
+    automation_status: "running",
+    automation_result: "in_progress",
+    automation_started_at: "2026-03-15T12:05:00+00:00",
+    execution_notes: "Started implementation and validated the affected task filters.",
+  },
+  activity: [
+    ...assignedAutomationTaskDetail.activity,
+    { id: 11, action: "automation_started", details: "Automated Changes started implementation work.", created_at: "2026-03-15T12:05:00+00:00", actor: { name: "Automated Changes" } },
+  ],
+};
+
+const readyAutomationTaskDetail = {
+  ...runningAutomationTaskDetail,
+  status: "ready_for_review",
+  workflow: { owner_type: "automation", execution_mode: "governed_automation", review_state: "pending_review", automation_source: "backlog" },
+  metadata: {
+    ...runningAutomationTaskDetail.metadata,
+    automation_status: "succeeded",
+    automation_result: "ready_for_review",
+    automation_completed_at: "2026-03-15T12:20:00+00:00",
+  },
+  activity: [
+    ...runningAutomationTaskDetail.activity,
+    { id: 12, action: "automation_ready_for_review", details: "Implementation completed and moved to ready for review.", created_at: "2026-03-15T12:20:00+00:00", actor: { name: "Automated Changes" } },
+  ],
+};
+
+const completedAutomationTaskDetail = {
+  ...runningAutomationTaskDetail,
+  status: "done",
+  workflow: { owner_type: "automation", execution_mode: "governed_automation", review_state: "completed", automation_source: "backlog" },
+  metadata: {
+    ...runningAutomationTaskDetail.metadata,
+    automation_status: "succeeded",
+    automation_result: "done",
+    automation_completed_at: "2026-03-15T12:25:00+00:00",
+    execution_notes: "Implemented the filter polish and validated the queue behavior.",
+  },
+  activity: [
+    ...runningAutomationTaskDetail.activity,
+    { id: 13, action: "automation_completed", details: "Automated Changes completed this task and moved it to done.", created_at: "2026-03-15T12:25:00+00:00", actor: { name: "Automated Changes" } },
+  ],
+};
+
+const failedAutomationTaskDetail = {
+  ...runningAutomationTaskDetail,
+  status: "blocked",
+  workflow: { owner_type: "automation", execution_mode: "governed_automation", review_state: "blocked", automation_source: "backlog" },
+  metadata: {
+    ...runningAutomationTaskDetail.metadata,
+    automation_status: "failed",
+    automation_result: "blocked",
+    automation_completed_at: "2026-03-15T12:18:00+00:00",
+    error_summary: "The shared filter component needs a dependency update before automation can finish.",
+  },
+  activity: [
+    ...runningAutomationTaskDetail.activity,
+    { id: 14, action: "automation_failed", details: "The shared filter component needs a dependency update before automation can finish.", created_at: "2026-03-15T12:18:00+00:00", actor: { name: "Automated Changes" } },
+  ],
+};
+
 let mockSelectedTaskDetail = null;
 let currentAutomationTaskDetail = automationTaskDetail;
 let mockTasks = [];
@@ -163,6 +232,8 @@ jest.mock("./useCompliancePageContext", () => ({
     startNextAutomationTask: mockStartNextAutomationTask,
     assignTaskToAutomation: mockAssignTaskToAutomation,
     startAutomationTask: mockStartAutomationTask,
+    completeAutomationTask: mockCompleteAutomationTask,
+    failAutomationTask: mockFailAutomationTask,
     blockAutomationTask: mockBlockAutomationTask,
     markAutomationTaskReadyForReview: mockMarkAutomationTaskReadyForReview,
     returnAutomationTaskToBacklog: mockReturnAutomationTaskToBacklog,
@@ -334,11 +405,27 @@ beforeEach(() => {
     return { payload: { task: { id: 4 } } };
   });
   mockStartAutomationTask.mockReset();
-  mockStartAutomationTask.mockResolvedValue({ payload: { task: { id: 4 } } });
+  mockStartAutomationTask.mockImplementation(async () => {
+    currentAutomationTaskDetail = runningAutomationTaskDetail;
+    return { payload: { task: { id: 4 } } };
+  });
+  mockCompleteAutomationTask.mockReset();
+  mockCompleteAutomationTask.mockImplementation(async () => {
+    currentAutomationTaskDetail = completedAutomationTaskDetail;
+    return { payload: { task: { id: 4 } } };
+  });
+  mockFailAutomationTask.mockReset();
+  mockFailAutomationTask.mockImplementation(async () => {
+    currentAutomationTaskDetail = failedAutomationTaskDetail;
+    return { payload: { task: { id: 4 } } };
+  });
   mockBlockAutomationTask.mockReset();
   mockBlockAutomationTask.mockResolvedValue({ payload: { task: { id: 4 } } });
   mockMarkAutomationTaskReadyForReview.mockReset();
-  mockMarkAutomationTaskReadyForReview.mockResolvedValue({ payload: { task: { id: 4 } } });
+  mockMarkAutomationTaskReadyForReview.mockImplementation(async () => {
+    currentAutomationTaskDetail = readyAutomationTaskDetail;
+    return { payload: { task: { id: 4 } } };
+  });
   mockReturnAutomationTaskToBacklog.mockReset();
   mockReturnAutomationTaskToBacklog.mockResolvedValue({ payload: { task: { id: 4 } } });
   mockUpdateAutomationTaskMetadata.mockReset();
@@ -433,7 +520,7 @@ test("automation task can be assigned to Automated Changes from the assignee con
   await waitFor(() => expect(mockAssignTaskToAutomation).toHaveBeenCalledWith(4));
 });
 
-test("automation task can be moved to ready for review with implementation metadata", async () => {
+test("automation task can be started and moved to ready for review with implementation metadata", async () => {
   const view = renderPage();
 
   await act(async () => {
@@ -458,6 +545,17 @@ test("automation task can be moved to ready for review with implementation metad
   );
 
   dialog = screen.getByRole("dialog", { name: "Improve task filter clarity" });
+  await userEvent.click(within(dialog).getByRole("button", { name: "Start Automated Work" }));
+
+  await waitFor(() => expect(mockStartAutomationTask).toHaveBeenCalledWith(4));
+
+  view.rerender(
+    <MemoryRouter>
+      <ComplianceTasksPage />
+    </MemoryRouter>,
+  );
+
+  dialog = screen.getByRole("dialog", { name: "Improve task filter clarity" });
   await userEvent.click(within(dialog).getByRole("button", { name: "Mark Ready for Review" }));
 
   await waitFor(() => {
@@ -469,6 +567,127 @@ test("automation task can be moved to ready for review with implementation metad
       }),
     );
   });
+});
+
+test("automation task can be completed to done with execution metadata", async () => {
+  const view = renderPage();
+
+  await act(async () => {
+    await userEvent.click(screen.getAllByText("Improve task filter clarity")[0]);
+  });
+  await waitFor(() => expect(mockLoadTaskDetail).toHaveBeenCalledWith(4));
+
+  view.rerender(
+    <MemoryRouter>
+      <ComplianceTasksPage />
+    </MemoryRouter>,
+  );
+
+  let dialog = screen.getByRole("dialog", { name: "Improve task filter clarity" });
+  await userEvent.selectOptions(within(dialog).getByLabelText("Assignee"), "__automation__");
+  await waitFor(() => expect(mockAssignTaskToAutomation).toHaveBeenCalledWith(4));
+
+  view.rerender(
+    <MemoryRouter>
+      <ComplianceTasksPage />
+    </MemoryRouter>,
+  );
+
+  dialog = screen.getByRole("dialog", { name: "Improve task filter clarity" });
+  await userEvent.click(within(dialog).getByRole("button", { name: "Start Automated Work" }));
+  await waitFor(() => expect(mockStartAutomationTask).toHaveBeenCalledWith(4));
+
+  view.rerender(
+    <MemoryRouter>
+      <ComplianceTasksPage />
+    </MemoryRouter>,
+  );
+
+  dialog = screen.getByRole("dialog", { name: "Improve task filter clarity" });
+  await userEvent.clear(within(dialog).getByLabelText("Execution notes"));
+  await userEvent.type(within(dialog).getByLabelText("Execution notes"), "Implemented the filter polish and validated the queue behavior.");
+  await userEvent.click(within(dialog).getByRole("button", { name: "Complete Automated Change" }));
+
+  await waitFor(() => {
+    expect(mockCompleteAutomationTask).toHaveBeenCalledWith(
+      4,
+      expect.objectContaining({
+        branch_name: "improvement/alex-imp-001-task-filter-clarity",
+        commit_message: "feat: improve task filter clarity",
+        execution_notes: "Implemented the filter polish and validated the queue behavior.",
+      }),
+    );
+  });
+
+  view.rerender(
+    <MemoryRouter>
+      <ComplianceTasksPage />
+    </MemoryRouter>,
+  );
+
+  dialog = screen.getByRole("dialog", { name: "Improve task filter clarity" });
+  expect(within(dialog).getAllByText("Done").length).toBeGreaterThan(0);
+  expect(within(dialog).getByText("Completed at")).toBeInTheDocument();
+});
+
+test("automation task failure captures the error summary in task detail", async () => {
+  const view = renderPage();
+
+  await act(async () => {
+    await userEvent.click(screen.getAllByText("Improve task filter clarity")[0]);
+  });
+  await waitFor(() => expect(mockLoadTaskDetail).toHaveBeenCalledWith(4));
+
+  view.rerender(
+    <MemoryRouter>
+      <ComplianceTasksPage />
+    </MemoryRouter>,
+  );
+
+  let dialog = screen.getByRole("dialog", { name: "Improve task filter clarity" });
+  await userEvent.selectOptions(within(dialog).getByLabelText("Assignee"), "__automation__");
+  await waitFor(() => expect(mockAssignTaskToAutomation).toHaveBeenCalledWith(4));
+
+  view.rerender(
+    <MemoryRouter>
+      <ComplianceTasksPage />
+    </MemoryRouter>,
+  );
+
+  dialog = screen.getByRole("dialog", { name: "Improve task filter clarity" });
+  await userEvent.click(within(dialog).getByRole("button", { name: "Start Automated Work" }));
+  await waitFor(() => expect(mockStartAutomationTask).toHaveBeenCalledWith(4));
+
+  view.rerender(
+    <MemoryRouter>
+      <ComplianceTasksPage />
+    </MemoryRouter>,
+  );
+
+  dialog = screen.getByRole("dialog", { name: "Improve task filter clarity" });
+  await userEvent.clear(within(dialog).getByLabelText("Error summary"));
+  await userEvent.type(within(dialog).getByLabelText("Error summary"), "The shared filter component needs a dependency update before automation can finish.");
+  await userEvent.click(within(dialog).getByRole("button", { name: "Mark Failed" }));
+
+  await waitFor(() => {
+    expect(mockFailAutomationTask).toHaveBeenCalledWith(
+      4,
+      expect.objectContaining({
+        next_status: "blocked",
+        error_summary: "The shared filter component needs a dependency update before automation can finish.",
+      }),
+    );
+  });
+
+  view.rerender(
+    <MemoryRouter>
+      <ComplianceTasksPage />
+    </MemoryRouter>,
+  );
+
+  dialog = screen.getByRole("dialog", { name: "Improve task filter clarity" });
+  expect(within(dialog).getByText("Failure Summary")).toBeInTheDocument();
+  expect(within(dialog).getAllByText("The shared filter component needs a dependency update before automation can finish.").length).toBeGreaterThan(0);
 });
 
 test("the queue disables starting a second automation task while one is already active", () => {

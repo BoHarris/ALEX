@@ -204,6 +204,8 @@ export default function ComplianceTasksPage() {
         onViewIncident={handleViewIncident}
         onAssignAutomation={() => runAutomationMutation(() => workspace.assignTaskToAutomation(selectedTaskId))}
         onStartAutomation={() => runAutomationMutation(() => workspace.startAutomationTask(selectedTaskId))}
+        onCompleteAutomation={(payload) => runAutomationMutation(() => workspace.completeAutomationTask(selectedTaskId, payload))}
+        onFailAutomation={(payload) => runAutomationMutation(() => workspace.failAutomationTask(selectedTaskId, payload || { next_status: "blocked" }))}
         onBlockAutomation={(payload) => runAutomationMutation(() => workspace.blockAutomationTask(selectedTaskId, payload || { reason: "Blocked during automation work." }))}
         onMarkAutomationReady={(payload) => runAutomationMutation(() => workspace.markAutomationTaskReadyForReview(selectedTaskId, payload))}
         onReturnAutomationToBacklog={(payload) => runAutomationMutation(() => workspace.returnAutomationTaskToBacklog(selectedTaskId, payload))}

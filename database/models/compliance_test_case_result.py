@@ -1,4 +1,4 @@
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, Numeric, String, Text, Index
 from sqlalchemy.sql import func
 
 from database.database import Base
@@ -6,6 +6,10 @@ from database.database import Base
 
 class ComplianceTestCaseResult(Base):
     __tablename__ = "compliance_test_case_results"
+    __table_args__ = (
+        Index('idx_test_result_run_id', 'test_run_id'),
+        Index('idx_test_result_run_status', 'test_run_id', 'status'),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     test_run_id = Column(Integer, ForeignKey("compliance_test_runs.id"), nullable=False, index=True)

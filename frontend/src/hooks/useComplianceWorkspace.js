@@ -413,6 +413,10 @@ export function useComplianceWorkspace(enabled = true) {
       mutateAndReturn(`/compliance/automation/tasks/${taskId}/assign`, null),
     startAutomationTask: (taskId) =>
       mutateAndReturn(`/compliance/automation/tasks/${taskId}/start`, null),
+    completeAutomationTask: (taskId, payload) =>
+      mutateAndReturn(`/compliance/automation/tasks/${taskId}/complete`, payload),
+    failAutomationTask: (taskId, payload) =>
+      mutateAndReturn(`/compliance/automation/tasks/${taskId}/fail`, payload),
     blockAutomationTask: (taskId, payload) =>
       mutateAndReturn(`/compliance/automation/tasks/${taskId}/block`, payload),
     markAutomationTaskReadyForReview: (taskId, payload) =>

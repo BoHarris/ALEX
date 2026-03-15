@@ -13,6 +13,7 @@ from routers import protected, logout, refresh
 from routers.admin_router import router as admin_router
 from routers.api_keys import router as api_keys_router
 from routers.compliance_router import router as compliance_router
+from routers.llm_admin import router as llm_admin_router
 from routers.onboarding import router as onboarding_router
 from routers.organizations import router as organizations_router
 from routers.privacy_metrics import router as privacy_metrics_router
@@ -143,6 +144,7 @@ app.include_router(onboarding_router)
 app.include_router(privacy_metrics_router)
 app.include_router(admin_router)
 app.include_router(compliance_router)
+app.include_router(llm_admin_router)
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):

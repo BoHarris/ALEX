@@ -25,11 +25,23 @@ def is_production() -> bool:
 sqlite_path = os.getenv("SQLITE_DB_PATH", "./pii_sentinel.db")
 DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip() or f"sqlite:///{sqlite_path}"
 IS_SQLITE_URL = DATABASE_URL.startswith("sqlite")
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False} if IS_SQLITE_URL else {},
-    pool_pre_ping=True,
-)
+
+# Connection pooling configuration (PostgreSQL/MySQL only)
+engine_config = {
+    "connect_args": {"check_same_thread": False} if IS_SQLITE_URL else {},
+    "pool_pre_ping": True,
+}
+
+if not IS_SQLITE_URL:
+    # Add pooling parameters for production database connections
+    engine_config.update({
+        "pool_size": int(os.getenv("DB_POOL_SIZE", "5")),
+        "max_overflow": int(os.getenv("DB_MAX_OVERFLOW", "10")),
+        "pool_recycle": int(os.getenv("DB_POOL_RECYCLE", "3600")),  # Recycle connections hourly
+        "pool_timeout": int(os.getenv("DB_POOL_TIMEOUT", "30")),
+    })
+
+engine = create_engine(DATABASE_URL, **engine_config)
 if ENV != "production":
     logger.debug("database.py loaded")
     logger.debug("SQLITE_DB_PATH env: %s", os.getenv("SQLITE_DB_PATH"))

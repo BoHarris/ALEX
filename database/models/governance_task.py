@@ -1,4 +1,4 @@
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, Index
 from sqlalchemy.sql import func
 
 from database.database import Base
@@ -6,6 +6,12 @@ from database.database import Base
 
 class GovernanceTask(Base):
     __tablename__ = "governance_tasks"
+    __table_args__ = (
+        Index('idx_governance_company_status', 'company_id', 'status'),
+        Index('idx_governance_company_priority', 'company_id', 'priority'),
+        Index('idx_governance_company_created', 'company_id', 'created_at'),
+        Index('idx_governance_company_assignee', 'company_id', 'assignee_employee_id'),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)

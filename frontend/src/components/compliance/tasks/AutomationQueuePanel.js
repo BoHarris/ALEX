@@ -12,6 +12,7 @@ function SummaryPill({ label, value }) {
 }
 
 function QueueTaskCard({ task, onOpen }) {
+  const summary = task.metadata?.implementation_summary || task.summary || task.description || "No summary available.";
   return (
     <button
       type="button"
@@ -24,7 +25,7 @@ function QueueTaskCard({ task, onOpen }) {
         <TaskPriorityBadge priority={task.priority} />
       </div>
       <p className="mt-3 text-sm font-semibold text-app">{task.title}</p>
-      <p className="mt-2 text-sm leading-6 text-app-secondary">{task.summary || task.description || "No summary available."}</p>
+      <p className="mt-2 text-sm leading-6 text-app-secondary">{summary}</p>
       <p className="mt-3 text-xs text-app-muted">{task.metadata?.backlog_item_id || task.source_id || "No backlog id"}</p>
     </button>
   );
@@ -73,6 +74,7 @@ export default function AutomationQueuePanel({
   const activeTask = automation?.active_task || null;
   const eligibleTasks = automation?.eligible_tasks || [];
   const readyForReviewTasks = automation?.ready_for_review_tasks || [];
+  const completedTasks = automation?.completed_tasks || [];
   const backlogItems = automation?.backlog_items || [];
 
   return (
@@ -81,7 +83,7 @@ export default function AutomationQueuePanel({
         <div>
           <h2 className="text-2xl font-semibold text-app">Automated Changes</h2>
           <p className="mt-2 max-w-3xl text-sm leading-6 text-app-secondary">
-            Governed backlog sync for low-risk improvement work. Automation can take one eligible task at a time, move it into progress, and hand it back in Ready for Review for human approval.
+            Governed backlog sync for low-risk improvement work. Automation can take one eligible task at a time, move it into progress, and either hand it back in Ready for Review or complete it to Done when the governed execution path succeeds.
           </p>
           <p className="mt-2 text-xs text-app-muted">Backlog source: {automation?.backlog_path || "docs/copilot_improvement_backlog.md"}</p>
         </div>
@@ -91,12 +93,13 @@ export default function AutomationQueuePanel({
         </div>
       </div>
 
-      <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+      <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-6">
         <SummaryPill label="Backlog Items" value={summary.backlog_items ?? 0} />
         <SummaryPill label="Synced Tasks" value={summary.synced_tasks ?? 0} />
         <SummaryPill label="Eligible" value={summary.eligible_tasks ?? 0} />
         <SummaryPill label="Active" value={summary.active_tasks ?? 0} />
         <SummaryPill label="Ready For Review" value={summary.ready_for_review ?? 0} />
+        <SummaryPill label="Completed" value={summary.completed ?? 0} />
       </div>
 
       <div className="mt-6 grid gap-6 xl:grid-cols-[1.1fr,0.9fr]">
@@ -132,6 +135,15 @@ export default function AutomationQueuePanel({
               {readyForReviewTasks.length ? readyForReviewTasks.map((task) => (
                 <QueueTaskCard key={task.id} task={task} onOpen={onOpenTask} />
               )) : <p className="text-sm text-app-secondary">Automation-completed work will appear here once it is ready for human review.</p>}
+            </div>
+          </section>
+
+          <section className="rounded-3xl border border-app bg-app/25 p-5">
+            <h3 className="text-lg font-semibold text-app">Completed Automation</h3>
+            <div className="mt-4 space-y-3">
+              {completedTasks.length ? completedTasks.map((task) => (
+                <QueueTaskCard key={task.id} task={task} onOpen={onOpenTask} />
+              )) : <p className="text-sm text-app-secondary">Successfully completed automation work will appear here once it moves to Done.</p>}
             </div>
           </section>
 
