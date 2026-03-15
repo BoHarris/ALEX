@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -393,6 +393,32 @@ class RiskUpdateRequest(BaseModel):
     review_date: datetime | None = None
 
 
+def _normalize_required_text(value: str, *, field_name: str) -> str:
+    normalized = (value or "").strip()
+    if not normalized:
+        raise ValueError(f"{field_name} is required")
+    return normalized
+
+
+def _normalize_optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _normalize_email(value: str) -> str:
+    normalized = _normalize_required_text(value, field_name="email").lower()
+    local, separator, domain = normalized.partition("@")
+    if separator != "@" or not local or not domain or "." not in domain:
+        raise ValueError("email must be a valid email address")
+    return normalized
+
+
+def _display_field_name(info: ValidationInfo) -> str:
+    return (info.field_name or "field").replace("_", " ")
+
+
 class EmployeeCreateRequest(BaseModel):
     first_name: str
     last_name: str
@@ -401,6 +427,21 @@ class EmployeeCreateRequest(BaseModel):
     department: str | None = None
     job_title: str | None = None
     status: str = "active"
+
+    @field_validator("first_name", "last_name", "role", "status")
+    @classmethod
+    def validate_required_employee_text(cls, value: str, info: ValidationInfo) -> str:
+        return _normalize_required_text(value, field_name=_display_field_name(info))
+
+    @field_validator("department", "job_title")
+    @classmethod
+    def normalize_optional_employee_text(cls, value: str | None) -> str | None:
+        return _normalize_optional_text(value)
+
+    @field_validator("email")
+    @classmethod
+    def validate_employee_email(cls, value: str) -> str:
+        return _normalize_email(value)
 
 
 class EmployeeUpdateRequest(BaseModel):
@@ -411,6 +452,25 @@ class EmployeeUpdateRequest(BaseModel):
     department: str | None = None
     job_title: str | None = None
     status: str | None = None
+
+    @field_validator("first_name", "last_name", "role", "status")
+    @classmethod
+    def validate_optional_employee_text(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if value is None:
+            return None
+        return _normalize_required_text(value, field_name=_display_field_name(info))
+
+    @field_validator("department", "job_title")
+    @classmethod
+    def normalize_optional_employee_update_text(cls, value: str | None) -> str | None:
+        return _normalize_optional_text(value)
+
+    @field_validator("email")
+    @classmethod
+    def validate_optional_employee_email(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _normalize_email(value)
 
 
 class TrainingModuleCreateRequest(BaseModel):
@@ -755,14 +815,14 @@ def list_employee_directory(current_employee: dict = Depends(require_compliance_
 
 @router.post("/directory")
 def create_employee(payload: EmployeeCreateRequest, current_employee: dict = Depends(require_security_or_compliance_admin), db: Session = Depends(get_db)):
-    normalized_email = payload.email.strip().lower()
+    normalized_email = payload.email
     if db.query(Employee).filter(Employee.email == normalized_email).first():
         raise HTTPException(status_code=409, detail=error_payload(detail="Employee email already exists", error_code="conflict"))
     employee_count = db.query(func.count(Employee.id)).filter(Employee.company_id == current_employee["organization_id"]).scalar() or 0
     employee = Employee(
         employee_id=f"EMP-{employee_count + 1:04d}",
-        first_name=payload.first_name.strip(),
-        last_name=payload.last_name.strip(),
+        first_name=payload.first_name,
+        last_name=payload.last_name,
         email=normalized_email,
         role=payload.role,
         department=payload.department,
@@ -784,12 +844,23 @@ def update_employee(employee_id: int, payload: EmployeeUpdateRequest, current_em
     employee = db.query(Employee).filter(Employee.id == employee_id, Employee.company_id == current_employee["organization_id"]).first()
     if not employee:
         raise HTTPException(status_code=404, detail=error_payload(detail="Employee not found", error_code="not_found"))
-    for field in ("first_name", "last_name", "role", "department", "job_title", "status"):
+    if payload.email is not None:
+        duplicate = (
+            db.query(Employee)
+            .filter(Employee.email == payload.email, Employee.id != employee.id)
+            .first()
+        )
+        if duplicate:
+            raise HTTPException(status_code=409, detail=error_payload(detail="Employee email already exists", error_code="conflict"))
+    for field in ("first_name", "last_name", "role", "status"):
         value = getattr(payload, field)
         if value is not None:
             setattr(employee, field, value)
+    for field in ("department", "job_title"):
+        if field in payload.model_fields_set:
+            setattr(employee, field, getattr(payload, field))
     if payload.email is not None:
-        employee.email = payload.email.strip().lower()
+        employee.email = payload.email
     db.add(employee)
     log_compliance_audit(db, company_id=current_employee["organization_id"], user_id=current_employee["user_id"], employee_id=current_employee["employee_id"], action="employee_updated", module="employee_directory", resource_type="employee", resource_id=str(employee.id), metadata={"status": employee.status, "role": employee.role})
     db.commit()
